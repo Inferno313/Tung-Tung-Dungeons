@@ -95,6 +95,7 @@ Constants.Remotes = {
     GameOver              = "GameOver",
     BossSpawned           = "BossSpawned",
     EnemyKilled           = "EnemyKilled",
+    RoomCleared           = "RoomCleared",
 }
 
 return Constants

@@ -21,6 +21,9 @@ type RoomInstance = {
     isBoss:     boolean,
     isLoot:     boolean,
     isSafe:     boolean,
+    centerPoint: Vector3,
+    exitPoint:   Vector3,
+    exitPart:    BasePart,
 }
 
 -- ─── State ───────────────────────────────────────────────────────────────────
@@ -38,7 +41,7 @@ local function buildRoomFromLayout(
     layout: { string },
     origin: Vector3,
     roomFolder: Folder
-): { spawnPoints: { Vector3 }, doors: { BasePart }, lootPoints: { Vector3 } }
+): { spawnPoints: { Vector3 }, doors: { BasePart }, lootPoints: { Vector3 }, centerPoint: Vector3, exitPoint: Vector3, exitPart: BasePart }
     local spawnPoints: { Vector3 } = {}
     local doors:       { BasePart } = {}
     local lootPoints:  { Vector3 } = {}
@@ -113,7 +116,45 @@ local function buildRoomFromLayout(
         end
     end
 
-    return { spawnPoints = spawnPoints, doors = doors, lootPoints = lootPoints }
+    -- Calculate room dimensions from layout
+    local layoutRows  = #layout
+    local layoutCols  = layout[1] and #layout[1] or 8
+    local roomWidth   = layoutCols * TILE_SIZE
+    local roomDepth   = layoutRows * TILE_SIZE
+
+    local centerPoint = origin + Vector3.new(roomWidth / 2, 1, roomDepth / 2)
+
+    -- Exit trigger: bright green Part at the far edge of the room
+    local exitPos = origin + Vector3.new(roomWidth / 2, 1, roomDepth - TILE_SIZE / 2)
+
+    local exitPart          = Instance.new("Part")
+    exitPart.Name           = "ExitTrigger"
+    exitPart.Size           = Vector3.new(TILE_SIZE * 2, 4, TILE_SIZE)
+    exitPart.Position       = exitPos
+    exitPart.Anchored       = true
+    exitPart.CanCollide     = false
+    exitPart.BrickColor     = BrickColor.new("Bright green")
+    exitPart.Material       = Enum.Material.Neon
+    exitPart.Transparency   = 0.4
+    exitPart.Parent         = roomFolder
+
+    local exitGui           = Instance.new("BillboardGui")
+    exitGui.Size            = UDim2.new(0, 120, 0, 40)
+    exitGui.StudsOffset     = Vector3.new(0, 3, 0)
+    exitGui.AlwaysOnTop     = true
+    exitGui.Parent          = exitPart
+
+    local exitLabel         = Instance.new("TextLabel")
+    exitLabel.Size          = UDim2.new(1, 0, 1, 0)
+    exitLabel.BackgroundTransparency = 1
+    exitLabel.TextColor3    = Color3.new(1, 1, 1)
+    exitLabel.Font          = Enum.Font.GothamBlack
+    exitLabel.TextSize      = 16
+    exitLabel.Text          = "EXIT  [E]"
+    exitLabel.Parent        = exitGui
+
+    return { spawnPoints = spawnPoints, doors = doors, lootPoints = lootPoints,
+             centerPoint = centerPoint, exitPoint = exitPos, exitPart = exitPart :: BasePart }
 end
 
 -- Chooses a sequence of room template IDs for a floor, ending with a boss room
@@ -195,6 +236,9 @@ function DungeonManager.loadFloor(floorNumber: number, onComplete: () -> ())
             isBoss      = template.type == "Boss",
             isLoot      = template.type == "Loot",
             isSafe      = template.type == "Safe",
+            centerPoint = built.centerPoint,
+            exitPoint   = built.exitPoint,
+            exitPart    = built.exitPart,
         })
     end
 
@@ -213,6 +257,27 @@ function DungeonManager.getRoomSpawnPoints(roomIndex: number): { Vector3 }
     local room = roomInstances[roomIndex]
     if room then return room.spawnPoints end
     return {}
+end
+
+-- Returns the world-space center of the given room (used to teleport players in).
+function DungeonManager.getRoomCenter(roomIndex: number): Vector3
+    local room = roomInstances[roomIndex]
+    if room then return room.centerPoint end
+    return Vector3.new(0, 2, 0)
+end
+
+-- Returns the exit trigger part for the given room.
+function DungeonManager.getRoomExitPart(roomIndex: number): BasePart?
+    local room = roomInstances[roomIndex]
+    if room then return room.exitPart end
+    return nil
+end
+
+-- Returns the exit point position of the given room.
+function DungeonManager.getRoomExitPoint(roomIndex: number): Vector3?
+    local room = roomInstances[roomIndex]
+    if room then return room.exitPoint end
+    return nil
 end
 
 -- Returns loot point positions for the given room.

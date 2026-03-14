@@ -94,6 +94,14 @@ local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Playe
     enemy.health = math.max(0, enemy.health - amount)
     broadcastHealth(enemy)
 
+    -- Update health bar fill
+    local hpFill = enemy.rootPart:FindFirstChild("BillboardGui") and
+        enemy.rootPart.BillboardGui:FindFirstChild("HPBg") and
+        enemy.rootPart.BillboardGui.HPBg:FindFirstChild("HPFill") :: Frame?
+    if hpFill then
+        hpFill.Size = UDim2.new(math.clamp(enemy.health / enemy.maxHealth, 0, 1), 0, 1, 0)
+    end
+
     if enemy.health <= 0 then
         enemy.isAlive = false
         enemy.humanoid.Health = 0
@@ -119,6 +127,18 @@ local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Playe
                 enemy.model:Destroy()
             end
         end)
+
+        -- Check if this was the last enemy → broadcast RoomCleared
+        local allDead = true
+        for _, e in activeEnemies do
+            if e.isAlive then
+                allDead = false
+                break
+            end
+        end
+        if allDead then
+            Remotes.RoomCleared:FireAllClients({})
+        end
     end
 end
 
@@ -315,9 +335,10 @@ local function spawnEnemy(brainrotId: string, position: Vector3, floorNumber: nu
 
     local rootPart          = Instance.new("Part")
     rootPart.Name           = "HumanoidRootPart"
-    rootPart.Size           = Vector3.new(2, 5, 2)
+    rootPart.Size           = Vector3.new(4, 6, 4)
     rootPart.Position       = position
     rootPart.BrickColor     = BrickColor.new("Bright red")
+    rootPart.Material       = Enum.Material.Neon
     rootPart.Anchored       = false
     rootPart.Parent         = model
 
@@ -326,6 +347,37 @@ local function spawnEnemy(brainrotId: string, position: Vector3, floorNumber: nu
     humanoid.Health         = scaledHealth
     humanoid.WalkSpeed      = def.speed * floorDef.enemyModifiers.speedMultiplier
     humanoid.Parent         = model
+
+    -- Billboard health bar above enemy
+    local billboard         = Instance.new("BillboardGui")
+    billboard.Size          = UDim2.new(0, 100, 0, 28)
+    billboard.StudsOffset   = Vector3.new(0, 5, 0)
+    billboard.AlwaysOnTop   = false
+    billboard.Parent        = rootPart
+
+    local nameLabel         = Instance.new("TextLabel")
+    nameLabel.Size          = UDim2.new(1, 0, 0.45, 0)
+    nameLabel.BackgroundTransparency = 1
+    nameLabel.TextColor3    = Color3.new(1, 0.2, 0.2)
+    nameLabel.Font          = Enum.Font.GothamBold
+    nameLabel.TextSize      = 11
+    nameLabel.Text          = def.displayName
+    nameLabel.Parent        = billboard
+
+    local hpBg              = Instance.new("Frame")
+    hpBg.Name               = "HPBg"
+    hpBg.Size               = UDim2.new(1, 0, 0.45, 0)
+    hpBg.Position           = UDim2.new(0, 0, 0.55, 0)
+    hpBg.BackgroundColor3   = Color3.fromRGB(40, 0, 0)
+    hpBg.BorderSizePixel    = 0
+    hpBg.Parent             = billboard
+
+    local hpFill            = Instance.new("Frame")
+    hpFill.Name             = "HPFill"
+    hpFill.Size             = UDim2.new(1, 0, 1, 0)
+    hpFill.BackgroundColor3 = Color3.fromRGB(220, 30, 30)
+    hpFill.BorderSizePixel  = 0
+    hpFill.Parent           = hpBg
 
     model.PrimaryPart       = rootPart
     model.Parent            = workspace

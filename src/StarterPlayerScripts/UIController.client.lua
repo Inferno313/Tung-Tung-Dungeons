@@ -234,10 +234,46 @@ Remotes.PlayerStatsUpdated.OnClientEvent:Connect(function(data: { [string]: any 
     -- TODO: update weapon icon image when equippedWeapon changes
 end)
 
+-- Persistent "Room Cleared" prompt shown until next room loads
+local roomClearedBanner: TextLabel? = nil
+
+local function showRoomClearedBanner()
+    if roomClearedBanner and roomClearedBanner.Parent then
+        roomClearedBanner:Destroy()
+    end
+
+    local banner                    = Instance.new("TextLabel")
+    banner.Name                     = "RoomClearedBanner"
+    banner.Size                     = UDim2.new(0.5, 0, 0, 50)
+    banner.Position                 = UDim2.new(0.25, 0, 0.82, 0)
+    banner.BackgroundColor3         = Color3.fromRGB(0, 100, 0)
+    banner.BackgroundTransparency   = 0.3
+    banner.TextColor3               = Color3.new(1, 1, 1)
+    banner.Font                     = Enum.Font.GothamBlack
+    banner.TextSize                 = 20
+    banner.Text                     = "Room Cleared!  Walk to the EXIT and press [E]"
+    banner.TextXAlignment           = Enum.TextXAlignment.Center
+    banner.ZIndex                   = 10
+    banner.Parent                   = hud.screenGui
+    roomClearedBanner               = banner
+end
+
+local function hideRoomClearedBanner()
+    if roomClearedBanner and roomClearedBanner.Parent then
+        roomClearedBanner:Destroy()
+        roomClearedBanner = nil
+    end
+end
+
+Remotes.RoomCleared.OnClientEvent:Connect(function(_: {})
+    showRoomClearedBanner()
+end)
+
 -- Room / floor loaded
 Remotes.DungeonRoomLoaded.OnClientEvent:Connect(function(info: { floor: number, room: number })
     hud.floorLabel.Text = string.format("Floor %d  ·  Room %d", info.floor, info.room)
     hud.bossHealthBar.Visible = false
+    hideRoomClearedBanner()
 end)
 
 -- Boss spawned: reveal boss health bar

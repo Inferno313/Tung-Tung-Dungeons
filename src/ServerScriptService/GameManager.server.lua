@@ -72,11 +72,29 @@ local function startGame()
     -- Load the first dungeon floor
     DungeonManager.loadFloor(session.currentFloor, function()
         session.state = "InGame"
+
+        -- Teleport players to the center of Room 1
+        local spawnPos = DungeonManager.getRoomCenter(1)
+        for _, player in session.players do
+            local char = player.Character
+            if char then
+                local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+                if root then
+                    root.CFrame = CFrame.new(spawnPos + Vector3.new(0, 3, 0))
+                end
+            end
+        end
+
         broadcastToAll(Remotes.DungeonRoomLoaded, {
             floor = session.currentFloor,
             room  = session.currentRoom,
         })
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
+
+        -- Safe rooms have no enemies; notify clients they can advance immediately
+        if EnemyManager.isRoomCleared(session.currentFloor, session.currentRoom) then
+            broadcastToAll(Remotes.RoomCleared, {})
+        end
     end)
 end
 
@@ -154,6 +172,32 @@ Remotes.RequestNextRoom.OnServerEvent:Connect(function(player: Player)
     end
 
     -- Drop loot for the cleared room
+    LootManager.dropRoomLoot(session.currentFloor, session.players, session.currentRoom)
+
+    local isLastRoom = DungeonManager.isLastRoom(session.currentFloor, session.currentRoom)
+    if isLastRoom then
+        advanceFloor()
+    else
+        advanceRoom()
+    end
+end)
+
+-- ─── Interact Handler (E key → advance room when at exit) ────────────────────
+
+Remotes.PlayerInteract.OnServerEvent:Connect(function(player: Player)
+    if session.state ~= "InGame" and session.state ~= "BossRoom" then return end
+    if not EnemyManager.isRoomCleared(session.currentFloor, session.currentRoom) then return end
+
+    -- Check player is near the exit trigger
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+    if not root then return end
+
+    local exitPoint = DungeonManager.getRoomExitPoint(session.currentRoom)
+    if exitPoint and (root.Position - exitPoint).Magnitude > 20 then return end
+
+    -- Drop loot then advance
     LootManager.dropRoomLoot(session.currentFloor, session.players, session.currentRoom)
 
     local isLastRoom = DungeonManager.isLastRoom(session.currentFloor, session.currentRoom)
