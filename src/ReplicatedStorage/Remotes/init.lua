@@ -5,7 +5,7 @@
 --   local Remotes = require(game.ReplicatedStorage.Remotes)
 --   Remotes.PlayerAttack:FireServer(...)
 
-local Constants = require(script.Parent.Parent.Data.Constants)
+local Constants = require(script.Parent.Data.Constants)
 
 -- On the server this module creates the remotes; on the client it waits for them.
 local isServer = game:GetService("RunService"):IsServer()
