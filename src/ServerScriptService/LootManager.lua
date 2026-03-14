@@ -158,8 +158,8 @@ end
 -- ─── Public API ──────────────────────────────────────────────────────────────
 
 -- Drops loot at the end of a combat room.
-function LootManager.dropRoomLoot(floorNumber: number, players: { Player })
-    local lootPoints = DungeonManager.getRoomLootPoints(1)  -- TODO: pass roomIndex
+function LootManager.dropRoomLoot(floorNumber: number, players: { Player }, roomIndex: number)
+    local lootPoints = DungeonManager.getRoomLootPoints(roomIndex)
     if #lootPoints == 0 then
         -- Fall back to random points near room centre
         lootPoints = {

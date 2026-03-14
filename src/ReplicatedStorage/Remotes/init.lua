@@ -43,5 +43,6 @@ Remotes.LootDropped          = getOrCreate(Constants.Remotes.LootDropped,       
 Remotes.FloorCompleted       = getOrCreate(Constants.Remotes.FloorCompleted,       "RemoteEvent") :: RemoteEvent
 Remotes.GameOver             = getOrCreate(Constants.Remotes.GameOver,             "RemoteEvent") :: RemoteEvent
 Remotes.BossSpawned          = getOrCreate(Constants.Remotes.BossSpawned,          "RemoteEvent") :: RemoteEvent
+Remotes.EnemyKilled          = getOrCreate(Constants.Remotes.EnemyKilled,          "RemoteEvent") :: RemoteEvent
 
 return Remotes

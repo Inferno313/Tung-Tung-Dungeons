@@ -324,15 +324,152 @@ Remotes.GameOver.OnClientEvent:Connect(function(info: { reason: string, floorRea
     end)
 end)
 
--- Loot dropped: show pick-up prompt / weapon selection
+-- Loot dropped: show weapon choice panel (keep current vs swap)
 Remotes.LootDropped.OnClientEvent:Connect(function(info: { type: string, weaponId: string? })
-    if info.type == "Weapon" and info.weaponId then
-        local WeaponData = require(ReplicatedStorage.Data.WeaponData)
-        local def        = WeaponData[info.weaponId]
-        if not def then return end
+    if info.type ~= "Weapon" or not info.weaponId then return end
 
-        -- TODO: Phase 3 — replace with a proper weapon-choice panel (keep vs swap)
-        -- For now, automatically equip the new weapon.
-        Remotes.EquipWeapon:FireServer(info.weaponId)
+    local WeaponData = require(ReplicatedStorage.Data.WeaponData)
+    local newDef     = WeaponData[info.weaponId]
+    if not newDef then return end
+
+    -- Build choice panel
+    local panel                 = Instance.new("Frame")
+    panel.Name                  = "WeaponChoicePanel"
+    panel.Size                  = UDim2.new(0, 420, 0, 200)
+    panel.Position              = UDim2.new(0.5, -210, 0.5, -100)
+    panel.BackgroundColor3      = Color3.fromRGB(20, 20, 20)
+    panel.BorderSizePixel       = 0
+    panel.ZIndex                = 30
+    panel.Parent                = hud.screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = panel
+
+    -- Title
+    local title                 = Instance.new("TextLabel")
+    title.Size                  = UDim2.new(1, 0, 0, 36)
+    title.Position              = UDim2.new(0, 0, 0, 0)
+    title.BackgroundTransparency= 1
+    title.TextColor3            = Constants.RARITY_COLORS[newDef.rarity] or Color3.new(1,1,1)
+    title.Font                  = Enum.Font.GothamBlack
+    title.TextSize              = 18
+    title.Text                  = string.format("WEAPON FOUND: %s", newDef.displayName)
+    title.TextXAlignment        = Enum.TextXAlignment.Center
+    title.ZIndex                = 31
+    title.Parent                = panel
+
+    -- Stats line
+    local stats                 = Instance.new("TextLabel")
+    stats.Size                  = UDim2.new(1, -20, 0, 24)
+    stats.Position              = UDim2.new(0, 10, 0, 40)
+    stats.BackgroundTransparency= 1
+    stats.TextColor3            = Color3.fromRGB(200, 200, 200)
+    stats.Font                  = Enum.Font.Gotham
+    stats.TextSize              = 14
+    stats.Text                  = string.format(
+        "%s  ·  DMG: %d  ·  SPD: %.1f  ·  Range: %d  ·  %s",
+        newDef.class, newDef.damage, newDef.attackSpeed, newDef.range, newDef.rarity
+    )
+    stats.TextXAlignment        = Enum.TextXAlignment.Center
+    stats.ZIndex                = 31
+    stats.Parent                = panel
+
+    -- Description
+    local desc                  = Instance.new("TextLabel")
+    desc.Size                   = UDim2.new(1, -20, 0, 40)
+    desc.Position               = UDim2.new(0, 10, 0, 68)
+    desc.BackgroundTransparency = 1
+    desc.TextColor3             = Color3.fromRGB(160, 160, 160)
+    desc.Font                   = Enum.Font.Gotham
+    desc.TextSize               = 13
+    desc.Text                   = newDef.description
+    desc.TextXAlignment         = Enum.TextXAlignment.Center
+    desc.TextWrapped            = true
+    desc.ZIndex                 = 31
+    desc.Parent                 = panel
+
+    local function makeButton(label: string, xPos: number, color: Color3): TextButton
+        local btn               = Instance.new("TextButton")
+        btn.Size                = UDim2.new(0, 180, 0, 44)
+        btn.Position            = UDim2.new(0, xPos, 0, 140)
+        btn.BackgroundColor3    = color
+        btn.BorderSizePixel     = 0
+        btn.TextColor3          = Color3.new(1, 1, 1)
+        btn.Font                = Enum.Font.GothamBold
+        btn.TextSize            = 16
+        btn.Text                = label
+        btn.ZIndex              = 31
+        btn.Parent              = panel
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = btn
+        return btn
     end
+
+    local swapBtn = makeButton("SWAP  ↑", 20,  Color3.fromRGB(40, 140, 40))
+    local keepBtn = makeButton("KEEP  →", 220, Color3.fromRGB(100, 40, 40))
+
+    -- Auto-dismiss after 12s with no input
+    local dismissed = false
+    local function dismiss()
+        if dismissed then return end
+        dismissed = true
+        panel:Destroy()
+    end
+
+    swapBtn.MouseButton1Click:Connect(function()
+        Remotes.EquipWeapon:FireServer(info.weaponId)
+        dismiss()
+    end)
+
+    keepBtn.MouseButton1Click:Connect(function()
+        dismiss()
+    end)
+
+    task.delay(12, dismiss)
+end)
+
+-- ─── Kill Feed ───────────────────────────────────────────────────────────────
+
+local MAX_KILL_FEED_ENTRIES = 6
+local killFeedEntries: { TextLabel } = {}
+
+Remotes.EnemyKilled.OnClientEvent:Connect(function(info: { displayName: string, killedBy: string, xpReward: number })
+    -- Remove oldest entry if at max
+    if #killFeedEntries >= MAX_KILL_FEED_ENTRIES then
+        local oldest = table.remove(killFeedEntries, 1)
+        if oldest and oldest.Parent then oldest:Destroy() end
+    end
+
+    -- Shift existing entries up
+    for _, entry in killFeedEntries do
+        entry.Position = UDim2.new(0, 0, entry.Position.Y.Scale - 0.04, 0)
+    end
+
+    local entry                 = Instance.new("TextLabel")
+    entry.Size                  = UDim2.new(1, 0, 0, 22)
+    entry.Position              = UDim2.new(0, 0, 1, -22)
+    entry.BackgroundTransparency= 0.4
+    entry.BackgroundColor3      = Color3.fromRGB(0, 0, 0)
+    entry.TextColor3            = Color3.fromRGB(255, 80, 80)
+    entry.Font                  = Enum.Font.GothamBold
+    entry.TextSize              = 13
+    entry.Text                  = string.format("✕ %s  [+%d XP]", info.displayName, info.xpReward)
+    entry.TextXAlignment        = Enum.TextXAlignment.Left
+    entry.TextTruncate          = Enum.TextTruncate.AtEnd
+    entry.ZIndex                = 5
+    entry.Parent                = hud.killFeed
+
+    table.insert(killFeedEntries, entry)
+
+    -- Fade out after 4 seconds
+    task.delay(4, function()
+        if not entry.Parent then return end
+        TweenService:Create(entry, TweenInfo.new(0.5), { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
+        task.delay(0.6, function()
+            if entry.Parent then entry:Destroy() end
+            table.remove(killFeedEntries, table.find(killFeedEntries, entry) or 1)
+        end)
+    end)
 end)

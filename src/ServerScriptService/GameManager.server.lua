@@ -154,7 +154,7 @@ Remotes.RequestNextRoom.OnServerEvent:Connect(function(player: Player)
     end
 
     -- Drop loot for the cleared room
-    LootManager.dropRoomLoot(session.currentFloor, session.players)
+    LootManager.dropRoomLoot(session.currentFloor, session.players, session.currentRoom)
 
     local isLastRoom = DungeonManager.isLastRoom(session.currentFloor, session.currentRoom)
     if isLastRoom then

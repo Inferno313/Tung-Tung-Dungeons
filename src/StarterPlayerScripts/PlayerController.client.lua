@@ -19,6 +19,7 @@ local camera      = workspace.CurrentCamera
 local moveVector      = Vector3.zero
 local isSprinting     = false
 local dodgeCooldown   = 0
+local attackCooldown  = 0
 local equippedWeapon  = "wooden_club"  -- updated by UIController when player equips
 
 -- ─── Input Vectors ───────────────────────────────────────────────────────────
@@ -92,9 +93,12 @@ RunService.Heartbeat:Connect(function(dt: number)
     if not humanoid or not rootPart then return end
     if humanoid.Health <= 0 then return end
 
-    -- Decrement dodge cooldown
+    -- Decrement cooldowns
     if dodgeCooldown > 0 then
         dodgeCooldown = math.max(0, dodgeCooldown - dt)
+    end
+    if attackCooldown > 0 then
+        attackCooldown = math.max(0, attackCooldown - dt)
     end
 
     -- Sprint stamina drain
@@ -198,9 +202,15 @@ end)
 
 -- ─── Attack (Mouse Button 1) ─────────────────────────────────────────────────
 
+local WeaponData = require(game.ReplicatedStorage.Data.WeaponData)
+
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
     if gameProcessed then return end
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if attackCooldown > 0 then return end
+        local weaponDef = WeaponData[equippedWeapon]
+        local cooldown  = weaponDef and (1 / weaponDef.attackSpeed) or 0.5
+        attackCooldown  = cooldown
         Remotes.PlayerAttack:FireServer(equippedWeapon)
     end
 end)

@@ -100,12 +100,18 @@ local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Playe
 
         -- Award XP and gold
         if attacker then
-            -- PlayerDataManager handles XP grant; we fire via Remotes
             Remotes.PlayerStatsUpdated:FireClient(attacker, {
                 xpGained   = enemy.def.xpReward,
                 goldGained = Util.randomInt(enemy.def.goldReward.min, enemy.def.goldReward.max),
             })
         end
+
+        -- Broadcast kill to all clients for kill feed
+        Remotes.EnemyKilled:FireAllClients({
+            displayName = enemy.def.displayName,
+            killedBy    = attacker and attacker.Name or "Unknown",
+            xpReward    = enemy.def.xpReward,
+        })
 
         -- Brief death animation pause then destroy
         task.delay(1.5, function()
