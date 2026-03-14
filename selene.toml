@@ -1,0 +1,17 @@
+# selene.toml — Luau linter configuration
+# https://kampfkarren.github.io/selene/
+
+std = "roblox"
+
+[rules]
+# Enforce strict typing best practices
+unused_variable = "warn"
+shadowing       = "warn"
+empty_if        = "warn"
+global_usage    = "warn"
+
+# Allow common Roblox globals
+[globals]
+game    = { any = true }
+script  = { any = true }
+workspace = { any = true }

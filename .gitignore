@@ -1,0 +1,33 @@
+# Roblox Studio binary files
+*.rbxl
+*.rbxlx
+*.rbxm
+*.rbxmx
+
+# Rojo session files
+*.session.json
+
+# Wally lockfile (commit this if you want reproducible builds; ignore otherwise)
+# wally.lock
+
+# Node / npm (if using TS toolchain)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Selene and Stylua caches
+.selene/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.user
+
+# Build output
+build/
+dist/
