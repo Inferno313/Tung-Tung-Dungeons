@@ -141,7 +141,7 @@ WeaponData["drum_beater"] = {
     upgradeScaling  = { damage = 6, attackSpeed = 0.04 },
     maxUpgradeLevel = 8,
 
-    modelId      = "rbxassetid://102119645434654",
+    modelId      = "rbxassetid://PLACEHOLDER_drum_beater_model",
     iconId       = "rbxassetid://PLACEHOLDER_drum_beater_icon",
     swingAnimId  = "rbxassetid://PLACEHOLDER_heavy_swing_anim",
     soundIdSwing = "rbxassetid://PLACEHOLDER_drum_hit_swing",

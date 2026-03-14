@@ -77,7 +77,7 @@ BrainrotData["tung_tung_tung"] = {
         },
     },
 
-    modelId      = "rbxassetid://PLACEHOLDER_tung_tung",
+    modelId      = "rbxassetid://102119645434654",
     soundIdAggro = "rbxassetid://PLACEHOLDER_tung_tung_aggro",
     soundIdAttack= "rbxassetid://PLACEHOLDER_tung_tung_attack",
     soundIdDeath = "rbxassetid://PLACEHOLDER_tung_tung_death",
