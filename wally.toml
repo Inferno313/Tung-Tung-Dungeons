@@ -1,0 +1,11 @@
+[package]
+name        = "inferno313/tung-tung-dungeons"
+version     = "0.1.0"
+registry    = "https://github.com/UpliftGames/wally-index"
+realm       = "shared"
+
+[dependencies]
+# Uncomment when needed:
+# Promise   = "evaera/promise@4.0.0"
+# Fusion    = "elttob/fusion@0.2.0"
+# ProfileService = "madstudioroblox/profileservice@1.0.0"
