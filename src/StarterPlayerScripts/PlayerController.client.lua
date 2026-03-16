@@ -46,7 +46,7 @@ local function cameraRelativeDirection(dir: Vector3): Vector3
     local camCF  = camera.CFrame
     local flat   = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z).Unit
     local right  = flat:Cross(Vector3.new(0, 1, 0))
-    return (right * dir.X + flat * -dir.Z).Unit
+    return -(right * dir.X + flat * -dir.Z).Unit
 end
 
 local function getMoveInput(): Vector3

@@ -430,6 +430,133 @@ Remotes.LootDropped.OnClientEvent:Connect(function(info: { type: string, weaponI
     task.delay(12, dismiss)
 end)
 
+-- Room cleared notification
+Remotes.RoomCleared.OnClientEvent:Connect(function(_info: { floor: number, room: number })
+    local banner            = Instance.new("TextLabel")
+    banner.Size             = UDim2.new(0.4, 0, 0, 40)
+    banner.Position         = UDim2.new(0.3, 0, 0.55, 0)
+    banner.BackgroundTransparency = 0.3
+    banner.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+    banner.TextColor3       = Color3.fromRGB(80, 255, 80)
+    banner.Font             = Enum.Font.GothamBlack
+    banner.TextSize         = 20
+    banner.Text             = "ROOM CLEARED  —  Press E to advance"
+    banner.TextXAlignment   = Enum.TextXAlignment.Center
+    banner.ZIndex           = 10
+    banner.Parent           = hud.screenGui
+
+    task.delay(4, function()
+        TweenService:Create(banner, TweenInfo.new(0.5), { TextTransparency = 1, BackgroundTransparency = 1 }):Play()
+        task.delay(0.6, function() banner:Destroy() end)
+    end)
+end)
+
+-- Upgrade station panel: shown when the player presses E near an anvil.
+Remotes.UpgradeStationNearby.OnClientEvent:Connect(function(info: {
+    weaponId: string, weaponLevel: number, upgradeCost: number
+})
+    -- Avoid duplicate panels
+    if hud.screenGui:FindFirstChild("UpgradePanel") then return end
+
+    local WeaponData = require(ReplicatedStorage.Data.WeaponData)
+    local weaponDef  = WeaponData[info.weaponId]
+    if not weaponDef then return end
+
+    local panel             = Instance.new("Frame")
+    panel.Name              = "UpgradePanel"
+    panel.Size              = UDim2.new(0, 380, 0, 160)
+    panel.Position          = UDim2.new(0.5, -190, 0.5, -80)
+    panel.BackgroundColor3  = Color3.fromRGB(20, 20, 20)
+    panel.BorderSizePixel   = 0
+    panel.ZIndex            = 30
+    panel.Parent            = hud.screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = panel
+
+    local title             = Instance.new("TextLabel")
+    title.Size              = UDim2.new(1, 0, 0, 36)
+    title.Position          = UDim2.new(0, 0, 0, 0)
+    title.BackgroundTransparency = 1
+    title.TextColor3        = Constants.RARITY_COLORS[weaponDef.rarity] or Color3.new(1, 1, 1)
+    title.Font              = Enum.Font.GothamBlack
+    title.TextSize          = 16
+    title.Text              = string.format("⚒  UPGRADE STATION  —  %s", weaponDef.displayName)
+    title.TextXAlignment    = Enum.TextXAlignment.Center
+    title.ZIndex            = 31
+    title.Parent            = panel
+
+    local info_label        = Instance.new("TextLabel")
+    info_label.Size         = UDim2.new(1, -20, 0, 28)
+    info_label.Position     = UDim2.new(0, 10, 0, 40)
+    info_label.BackgroundTransparency = 1
+    info_label.TextColor3   = Color3.fromRGB(200, 200, 200)
+    info_label.Font         = Enum.Font.Gotham
+    info_label.TextSize     = 14
+    info_label.Text         = string.format(
+        "Level %d  →  Level %d     Cost: %d gold",
+        info.weaponLevel, info.weaponLevel + 1, info.upgradeCost
+    )
+    info_label.TextXAlignment = Enum.TextXAlignment.Center
+    info_label.ZIndex       = 31
+    info_label.Parent       = panel
+
+    local bonus_label       = Instance.new("TextLabel")
+    bonus_label.Size        = UDim2.new(1, -20, 0, 22)
+    bonus_label.Position    = UDim2.new(0, 10, 0, 70)
+    bonus_label.BackgroundTransparency = 1
+    bonus_label.TextColor3  = Color3.fromRGB(160, 160, 160)
+    bonus_label.Font        = Enum.Font.Gotham
+    bonus_label.TextSize    = 13
+    bonus_label.Text        = string.format(
+        "+%d damage  +%.2f atk speed per upgrade",
+        weaponDef.upgradeScaling.damage, weaponDef.upgradeScaling.attackSpeed
+    )
+    bonus_label.TextXAlignment = Enum.TextXAlignment.Center
+    bonus_label.ZIndex      = 31
+    bonus_label.Parent      = panel
+
+    local function makeBtn(label: string, xOff: number, color: Color3): TextButton
+        local btn           = Instance.new("TextButton")
+        btn.Size            = UDim2.new(0, 160, 0, 40)
+        btn.Position        = UDim2.new(0, xOff, 0, 104)
+        btn.BackgroundColor3 = color
+        btn.BorderSizePixel = 0
+        btn.TextColor3      = Color3.new(1, 1, 1)
+        btn.Font            = Enum.Font.GothamBold
+        btn.TextSize        = 15
+        btn.Text            = label
+        btn.ZIndex          = 31
+        btn.Parent          = panel
+        local c = Instance.new("UICorner")
+        c.CornerRadius = UDim.new(0, 6)
+        c.Parent = btn
+        return btn
+    end
+
+    local upgradeBtn = makeBtn("UPGRADE  ⚒", 20,  Color3.fromRGB(40, 140, 40))
+    local closeBtn   = makeBtn("CLOSE",       200, Color3.fromRGB(90, 30, 30))
+
+    local dismissed = false
+    local function dismiss()
+        if dismissed then return end
+        dismissed = true
+        panel:Destroy()
+    end
+
+    upgradeBtn.MouseButton1Click:Connect(function()
+        Remotes.UpgradeWeapon:FireServer()
+        dismiss()
+    end)
+
+    closeBtn.MouseButton1Click:Connect(function()
+        dismiss()
+    end)
+
+    task.delay(10, dismiss)
+end)
+
 -- ─── Kill Feed ───────────────────────────────────────────────────────────────
 
 local MAX_KILL_FEED_ENTRIES = 6

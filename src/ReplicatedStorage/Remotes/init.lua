@@ -44,5 +44,10 @@ Remotes.FloorCompleted       = getOrCreate(Constants.Remotes.FloorCompleted,    
 Remotes.GameOver             = getOrCreate(Constants.Remotes.GameOver,             "RemoteEvent") :: RemoteEvent
 Remotes.BossSpawned          = getOrCreate(Constants.Remotes.BossSpawned,          "RemoteEvent") :: RemoteEvent
 Remotes.EnemyKilled          = getOrCreate(Constants.Remotes.EnemyKilled,          "RemoteEvent") :: RemoteEvent
+Remotes.RoomCleared          = getOrCreate(Constants.Remotes.RoomCleared,          "RemoteEvent") :: RemoteEvent
+
+-- Upgrade station
+Remotes.UpgradeWeapon        = getOrCreate(Constants.Remotes.UpgradeWeapon,        "RemoteEvent") :: RemoteEvent
+Remotes.UpgradeStationNearby = getOrCreate(Constants.Remotes.UpgradeStationNearby, "RemoteEvent") :: RemoteEvent
 
 return Remotes

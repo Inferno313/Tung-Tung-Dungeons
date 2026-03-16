@@ -31,7 +31,7 @@ type RunData = {
     currentXp:      number,
     currentGold:    number,
     equippedWeapon: string,
-    weaponLevel:    number,
+    weaponLevel:    number,   -- upgrade level of the equipped weapon this run
 }
 
 -- ─── Constants ───────────────────────────────────────────────────────────────
@@ -226,6 +226,47 @@ function PlayerDataManager.getEquippedWeapon(player: Player): string
     return "wooden_club"
 end
 
+-- Returns the current upgrade level of the player's equipped weapon this run.
+function PlayerDataManager.getWeaponLevel(player: Player): number
+    local rData = runData[player.UserId]
+    if rData then return rData.weaponLevel end
+    return 1
+end
+
+-- Attempts to upgrade the player's equipped weapon; deducts gold on success.
+-- Returns true if the upgrade was applied.
+function PlayerDataManager.upgradeWeapon(player: Player): boolean
+    local pData = persistentData[player.UserId]
+    local rData = runData[player.UserId]
+    if not pData or not rData then return false end
+
+    local WeaponData = require(game:GetService("ReplicatedStorage").Data.WeaponData)
+    local weaponId   = rData.equippedWeapon
+    local weaponDef  = WeaponData[weaponId]
+    if not weaponDef then return false end
+
+    if rData.weaponLevel >= weaponDef.maxUpgradeLevel then
+        warn("[PlayerDataManager]", player.Name, "weapon already at max level")
+        return false
+    end
+
+    local cost = Constants.WEAPON_UPGRADE_COST_BASE * rData.weaponLevel
+    if pData.gold < cost then
+        warn("[PlayerDataManager]", player.Name, "not enough gold to upgrade:", pData.gold, "<", cost)
+        return false
+    end
+
+    pData.gold      -= cost
+    rData.weaponLevel += 1
+
+    Remotes.PlayerStatsUpdated:FireClient(player, {
+        gold          = pData.gold,
+        weaponId      = weaponId,
+        weaponUpgrade = rData.weaponLevel,
+    })
+    return true
+end
+
 -- ─── Hook into Player Events ─────────────────────────────────────────────────
 
 Players.PlayerAdded:Connect(PlayerDataManager.onPlayerAdded)
@@ -242,7 +283,9 @@ Remotes.EquipWeapon.OnServerEvent:Connect(function(player: Player, weaponId: str
     PlayerDataManager.equipWeapon(player, weaponId)
 end)
 
--- Award kill rewards triggered by EnemyManager via PlayerStatsUpdated remote
-Remotes.PlayerStatsUpdated.OnServerEvent = nil  -- One-way (server→client only)
+-- Weapon upgrade request from client (proximity-gated by GameManager)
+Remotes.UpgradeWeapon.OnServerEvent:Connect(function(player: Player)
+    PlayerDataManager.upgradeWeapon(player)
+end)
 
 return PlayerDataManager

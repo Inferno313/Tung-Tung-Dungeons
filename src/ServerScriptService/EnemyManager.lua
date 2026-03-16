@@ -8,13 +8,14 @@ local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PathfindingService= game:GetService("PathfindingService")
 
-local BrainrotData   = require(ReplicatedStorage.Data.BrainrotData)
-local DungeonData    = require(ReplicatedStorage.Data.DungeonData)
-local Constants      = require(ReplicatedStorage.Data.Constants)
-local Util           = require(ReplicatedStorage.Modules.Util)
-local StateMachine   = require(ReplicatedStorage.Modules.StateMachine)
-local Remotes        = require(ReplicatedStorage.Remotes)
-local DungeonManager = require(script.Parent.DungeonManager)
+local BrainrotData      = require(ReplicatedStorage.Data.BrainrotData)
+local DungeonData       = require(ReplicatedStorage.Data.DungeonData)
+local Constants         = require(ReplicatedStorage.Data.Constants)
+local Util              = require(ReplicatedStorage.Modules.Util)
+local StateMachine      = require(ReplicatedStorage.Modules.StateMachine)
+local Remotes           = require(ReplicatedStorage.Remotes)
+local DungeonManager    = require(script.Parent.DungeonManager)
+local PlayerDataManager = require(script.Parent.PlayerDataManager)
 
 -- ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -39,6 +40,9 @@ local EnemyManager = {}
 
 local activeEnemies: { EnemyInstance } = {}
 local roomKey: string = "0_0"   -- "floor_room"
+local lastBossDeathPosition: Vector3? = nil
+
+local PROJECTILE_SPEED = 80  -- studs per second
 
 -- ─── Private Helpers ─────────────────────────────────────────────────────────
 
@@ -98,12 +102,15 @@ local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Playe
         enemy.isAlive = false
         enemy.humanoid.Health = 0
 
-        -- Award XP and gold
+        -- Track boss death position for loot drop
+        if enemy.def.archetype == "Boss" then
+            lastBossDeathPosition = enemy.rootPart.Position
+        end
+
+        -- Award XP and gold through PlayerDataManager (persists to DataStore)
         if attacker then
-            Remotes.PlayerStatsUpdated:FireClient(attacker, {
-                xpGained   = enemy.def.xpReward,
-                goldGained = Util.randomInt(enemy.def.goldReward.min, enemy.def.goldReward.max),
-            })
+            local gold = Util.randomInt(enemy.def.goldReward.min, enemy.def.goldReward.max)
+            PlayerDataManager.awardKillRewards(attacker, enemy.def.xpReward, gold)
         end
 
         -- Broadcast kill to all clients for kill feed
@@ -407,26 +414,138 @@ function EnemyManager.despawnAll()
     activeEnemies = {}
 end
 
--- Called by the attack remote to deal damage to the nearest enemy.
+-- ─── Projectile System ───────────────────────────────────────────────────────
+
+local WeaponData = require(ReplicatedStorage.Data.WeaponData)
+
+local PROJECTILE_COLORS: { [string]: Color3 } = {
+    Fire     = Color3.fromRGB(255, 120,  20),
+    Ice      = Color3.fromRGB(100, 210, 255),
+    Electric = Color3.fromRGB(255, 240,  50),
+    Chaos    = Color3.fromRGB(200,  80, 255),
+    None     = Color3.fromRGB(200, 200, 200),
+}
+
+local function spawnProjectile(player: Player, weaponDef: WeaponData.WeaponDef, origin: Vector3, direction: Vector3)
+    local proj           = Instance.new("Part")
+    proj.Name            = "Projectile_" .. weaponDef.id
+    proj.Shape           = Enum.PartType.Ball
+    proj.Size            = Vector3.new(0.7, 0.7, 0.7)
+    proj.CFrame          = CFrame.new(origin + Vector3.new(0, 1.2, 0))
+    proj.Material        = Enum.Material.Neon
+    proj.Color           = PROJECTILE_COLORS[weaponDef.element] or PROJECTILE_COLORS.None
+    proj.CastShadow      = false
+    proj.CanCollide      = false
+    proj.Parent          = workspace
+
+    local bv         = Instance.new("BodyVelocity")
+    bv.Velocity      = direction.Unit * PROJECTILE_SPEED
+    bv.MaxForce      = Vector3.new(1e5, 1e5, 1e5)
+    bv.Parent        = proj
+
+    local hitHandled = false
+
+    proj.Touched:Connect(function(part: BasePart)
+        if hitHandled then return end
+        -- Ignore touches from parts not belonging to an enemy
+        for _, enemy in activeEnemies do
+            if not enemy.isAlive then continue end
+            if part == enemy.rootPart or part:IsDescendantOf(enemy.model) then
+                hitHandled = not weaponDef.isPiercing  -- piercing keeps going
+                local hitPos = proj.Position
+
+                if weaponDef.aoeRadius > 0 then
+                    -- AoE explosion: damage all enemies in radius
+                    for _, aoeEnemy in activeEnemies do
+                        if not aoeEnemy.isAlive then continue end
+                        if (aoeEnemy.rootPart.Position - hitPos).Magnitude <= weaponDef.aoeRadius then
+                            damageEnemy(aoeEnemy, weaponDef.damage, player)
+                        end
+                    end
+                else
+                    damageEnemy(enemy, weaponDef.damage, player)
+                end
+
+                if hitHandled then
+                    proj:Destroy()
+                end
+                return
+            end
+        end
+    end)
+
+    -- Auto-destroy after weapon range is exhausted
+    task.delay(weaponDef.range / PROJECTILE_SPEED + 0.1, function()
+        if proj and proj.Parent then proj:Destroy() end
+    end)
+end
+
+-- ─── Player Attack Handler ────────────────────────────────────────────────────
+
+-- Called by the attack remote to deal damage.
+-- Melee: 120° arc in front of player, respects aoeRadius for wide swings.
+-- Ranged / Magic: spawns a visible projectile.
 function EnemyManager.handlePlayerAttack(player: Player, weaponId: string)
     local char = player.Character
     if not char then return end
     local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
     if not root then return end
 
-    local WeaponData = require(ReplicatedStorage.Data.WeaponData)
-    local weaponDef  = WeaponData[weaponId]
+    local weaponDef = WeaponData[weaponId]
     if not weaponDef then return end
 
-    -- Find enemies within weapon range
+    -- ── Ranged / Magic → projectile ────────────────────────────────────────
+    if weaponDef.class == "Ranged" or weaponDef.class == "Magic" then
+        local aimDir = root.CFrame.LookVector
+        if weaponDef.isHoming then
+            -- Override direction: aim at nearest enemy
+            local nearest, _ = nearestPlayer(root.Position)
+            -- nearestPlayer finds players; we need nearest enemy instead
+            local closestDist = math.huge
+            for _, enemy in activeEnemies do
+                if not enemy.isAlive then continue end
+                local d = (enemy.rootPart.Position - root.Position).Magnitude
+                if d < closestDist then
+                    closestDist = d
+                    aimDir = (enemy.rootPart.Position - root.Position).Unit
+                end
+            end
+        end
+        spawnProjectile(player, weaponDef, root.Position, aimDir)
+        return
+    end
+
+    -- ── Melee → arc + optional AoE ─────────────────────────────────────────
+    local lookDir    = root.CFrame.LookVector
+    local flatLook   = Vector3.new(lookDir.X, 0, lookDir.Z)
+    local hasAoE     = weaponDef.aoeRadius > 0
+    local hitRange   = hasAoE and weaponDef.aoeRadius or weaponDef.range
+    -- ARC_DOT: cos(60°) = 0.5 for 120° total cone; AoE ignores arc (hits all around)
+    local ARC_DOT    = 0.5
+
     for _, enemy in activeEnemies do
         if not enemy.isAlive then continue end
-        local dist = (enemy.rootPart.Position - root.Position).Magnitude
-        if dist <= weaponDef.range then
-            damageEnemy(enemy, weaponDef.damage, player)
-            if not weaponDef.isPiercing then break end  -- single-target stops at first hit
+        local offset = enemy.rootPart.Position - root.Position
+        local dist   = offset.Magnitude
+        if dist > hitRange then continue end
+
+        if not hasAoE then
+            -- Arc check: enemy must be within 60° of player's look direction
+            local flatOffset = Vector3.new(offset.X, 0, offset.Z)
+            if flatOffset.Magnitude > 0 and flatLook.Magnitude > 0 then
+                local dot = flatOffset.Unit:Dot(flatLook.Unit)
+                if dot < ARC_DOT then continue end
+            end
         end
+
+        damageEnemy(enemy, weaponDef.damage, player)
+        if not weaponDef.isPiercing and not hasAoE then break end
     end
+end
+
+-- Returns the world position where the last boss died (for loot drop).
+function EnemyManager.getLastBossPosition(): Vector3?
+    return lastBossDeathPosition
 end
 
 -- ─── Heartbeat Loop ──────────────────────────────────────────────────────────
@@ -441,8 +560,7 @@ end)
 
 -- ─── Remote Wiring ───────────────────────────────────────────────────────────
 
-local Remotes2 = require(ReplicatedStorage.Remotes)
-Remotes2.PlayerAttack.OnServerEvent:Connect(function(player: Player, weaponId: string)
+Remotes.PlayerAttack.OnServerEvent:Connect(function(player: Player, weaponId: string)
     EnemyManager.handlePlayerAttack(player, weaponId)
 end)
 
