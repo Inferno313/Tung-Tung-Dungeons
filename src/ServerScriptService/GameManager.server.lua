@@ -10,6 +10,8 @@ local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants         = require(ReplicatedStorage.Data.Constants)
+local DungeonData       = require(ReplicatedStorage.Data.DungeonData)
+local BrainrotData      = require(ReplicatedStorage.Data.BrainrotData)
 local Remotes           = require(ReplicatedStorage.Remotes)
 local DungeonManager    = require(script.Parent.DungeonManager)
 local EnemyManager      = require(script.Parent.EnemyManager)
@@ -79,8 +81,10 @@ local function startGame()
     DungeonManager.loadFloor(session.currentFloor, function()
         session.state = "InGame"
         broadcastToAll(Remotes.DungeonRoomLoaded, {
-            floor = session.currentFloor,
-            room  = session.currentRoom,
+            floor      = session.currentFloor,
+            room       = session.currentRoom,
+            roomTypes  = DungeonManager.getFloorRoomTypes(),
+            totalRooms = #DungeonManager.getFloorRoomTypes(),
         })
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
         lockCurrentRoomDoors()
@@ -92,16 +96,21 @@ local function advanceRoom()
     session.roomsCleared += 1
 
     broadcastToAll(Remotes.DungeonRoomLoaded, {
-        floor = session.currentFloor,
-        room  = session.currentRoom,
+        floor      = session.currentFloor,
+        room       = session.currentRoom,
+        roomTypes  = DungeonManager.getFloorRoomTypes(),
+        totalRooms = #DungeonManager.getFloorRoomTypes(),
     })
 
     DungeonManager.loadRoom(session.currentFloor, session.currentRoom, function()
         local isBoss = DungeonManager.isBossRoom(session.currentFloor, session.currentRoom)
         if isBoss then
             session.state = "BossRoom"
+            local floorDef  = DungeonData.getFloor(session.currentFloor)
+            local bossDef   = floorDef.bossId and BrainrotData[floorDef.bossId]
             broadcastToAll(Remotes.BossSpawned, {
-                floor = session.currentFloor,
+                floor    = session.currentFloor,
+                bossName = bossDef and bossDef.displayName or "???",
             })
         end
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
@@ -122,8 +131,10 @@ local function advanceFloor()
     DungeonManager.loadFloor(session.currentFloor, function()
         session.state = "InGame"
         broadcastToAll(Remotes.DungeonRoomLoaded, {
-            floor = session.currentFloor,
-            room  = session.currentRoom,
+            floor      = session.currentFloor,
+            room       = session.currentRoom,
+            roomTypes  = DungeonManager.getFloorRoomTypes(),
+            totalRooms = #DungeonManager.getFloorRoomTypes(),
         })
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
         lockCurrentRoomDoors()

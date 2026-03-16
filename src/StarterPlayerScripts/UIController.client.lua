@@ -3,9 +3,10 @@
 -- Drives all HUD elements and overlay screens (GameOver, FloorComplete, Inventory).
 -- Listens to Remotes from the server and updates the UI reactively.
 
-local Players           = game:GetService("Players")
-local TweenService      = game:GetService("TweenService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players             = game:GetService("Players")
+local TweenService        = game:GetService("TweenService")
+local UserInputService    = game:GetService("UserInputService")
+local ReplicatedStorage   = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Data.Constants)
 local Remotes   = require(ReplicatedStorage.Remotes)
@@ -16,21 +17,22 @@ local playerGui   = localPlayer:WaitForChild("PlayerGui")
 -- ─── Types ───────────────────────────────────────────────────────────────────
 
 type HUDRefs = {
-    screenGui:    ScreenGui,
-    healthBar:    Frame,
-    healthFill:   Frame,
-    staminaBar:   Frame,
-    staminaFill:  Frame,
-    xpBar:        Frame,
-    xpFill:       Frame,
-    levelLabel:   TextLabel,
-    goldLabel:    TextLabel,
-    floorLabel:   TextLabel,
-    weaponIcon:   ImageLabel,
-    killFeed:     ScrollingFrame,
-    bossHealthBar:Frame,
-    bossHealthFill:Frame,
-    bossNameLabel: TextLabel,
+    screenGui:      ScreenGui,
+    healthBar:      Frame,
+    healthFill:     Frame,
+    staminaBar:     Frame,
+    staminaFill:    Frame,
+    xpBar:          Frame,
+    xpFill:         Frame,
+    levelLabel:     TextLabel,
+    goldLabel:      TextLabel,
+    floorLabel:     TextLabel,
+    weaponIcon:     ImageLabel,
+    killFeed:       ScrollingFrame,
+    bossHealthBar:  Frame,
+    bossHealthFill: Frame,
+    bossNameLabel:  TextLabel,
+    minimap:        Frame,   -- container; room boxes added dynamically
 }
 
 -- ─── HUD Builder ─────────────────────────────────────────────────────────────
@@ -168,28 +170,273 @@ local function buildHUD(): HUDRefs
     killFeed.CanvasSize         = UDim2.new(0, 0, 0, 0)
     killFeed.Parent             = screenGui
 
+    -- ── Minimap (top-right) ───────────────────────────────────────────────
+    local minimap               = Instance.new("Frame")
+    minimap.Name                = "Minimap"
+    minimap.Size                = UDim2.new(0, 20, 0, 20)   -- resized on floor load
+    minimap.Position            = UDim2.new(1, -10, 0, 8)   -- anchored to right; shifts left dynamically
+    minimap.BackgroundColor3    = Color3.fromRGB(10, 10, 10)
+    minimap.BackgroundTransparency = 0.45
+    minimap.BorderSizePixel     = 0
+    minimap.ZIndex              = 5
+    minimap.Parent              = screenGui
+
     return {
-        screenGui    = screenGui,
-        healthBar    = healthBar,
-        healthFill   = healthFill,
-        staminaBar   = staminaBar,
-        staminaFill  = staminaFill,
-        xpBar        = xpBar,
-        xpFill       = xpFill,
-        levelLabel   = levelLabel,
-        goldLabel    = goldLabel,
-        floorLabel   = floorLabel,
-        weaponIcon   = weaponIcon,
-        killFeed     = killFeed,
+        screenGui      = screenGui,
+        healthBar      = healthBar,
+        healthFill     = healthFill,
+        staminaBar     = staminaBar,
+        staminaFill    = staminaFill,
+        xpBar          = xpBar,
+        xpFill         = xpFill,
+        levelLabel     = levelLabel,
+        goldLabel      = goldLabel,
+        floorLabel     = floorLabel,
+        weaponIcon     = weaponIcon,
+        killFeed       = killFeed,
         bossHealthBar  = bossBar,
         bossHealthFill = bossFill,
         bossNameLabel  = bossNameLabel,
+        minimap        = minimap,
     }
 end
 
--- ─── HUD Update Helpers ──────────────────────────────────────────────────────
+-- ─── HUD Build ───────────────────────────────────────────────────────────────
 
 local hud: HUDRefs = buildHUD()
+
+-- ─── Cached Player Stats (updated from server events) ────────────────────────
+
+local playerStats = {
+    level:        number,
+    xp:           number,
+    gold:         number,
+    weaponId:     string,
+    weaponUpgrade: number,
+}
+playerStats.level         = 1
+playerStats.xp            = 0
+playerStats.gold          = 0
+playerStats.weaponId      = "wooden_club"
+playerStats.weaponUpgrade = 1
+
+-- ─── Minimap ─────────────────────────────────────────────────────────────────
+
+local MINI_ROOM_W  = 12
+local MINI_ROOM_H  = 8
+local MINI_GAP     = 2
+local MINI_PADDING = 6
+
+local MINI_COLORS: { [string]: Color3 } = {
+    Safe   = Color3.fromRGB(50,  200,  50),
+    Loot   = Color3.fromRGB(220, 200,   0),
+    Boss   = Color3.fromRGB(220,  30,  30),
+    Combat = Color3.fromRGB(100, 100, 110),
+}
+
+local function updateMinimap(roomTypes: { string }, currentRoom: number)
+    -- Clear previous room boxes
+    for _, child in hud.minimap:GetChildren() do
+        child:Destroy()
+    end
+
+    local n           = #roomTypes
+    local totalW      = n * (MINI_ROOM_W + MINI_GAP) - MINI_GAP + MINI_PADDING * 2
+    local totalH      = MINI_ROOM_H + MINI_PADDING * 2
+
+    hud.minimap.Size     = UDim2.new(0, totalW, 0, totalH)
+    hud.minimap.Position = UDim2.new(1, -(totalW + 8), 0, 8)
+
+    for i, roomType in roomTypes do
+        local xOff      = MINI_PADDING + (i - 1) * (MINI_ROOM_W + MINI_GAP)
+        local isCurrent = i == currentRoom
+
+        local box               = Instance.new("Frame")
+        box.Name                = "Room_" .. i
+        box.Size                = UDim2.new(0, MINI_ROOM_W, 0, MINI_ROOM_H)
+        box.Position            = UDim2.new(0, xOff, 0.5, -MINI_ROOM_H / 2)
+        box.BackgroundColor3    = MINI_COLORS[roomType] or MINI_COLORS.Combat
+        box.BackgroundTransparency = isCurrent and 0 or 0.45
+        box.BorderSizePixel     = isCurrent and 2 or 1
+        box.BorderColor3        = isCurrent and Color3.new(1, 1, 1) or Color3.fromRGB(40, 40, 40)
+        box.ZIndex              = 6
+        box.Parent              = hud.minimap
+
+        -- Cleared rooms get a small tick
+        if i < currentRoom then
+            local tick          = Instance.new("TextLabel")
+            tick.Size           = UDim2.new(1, 0, 1, 0)
+            tick.BackgroundTransparency = 1
+            tick.TextColor3     = Color3.new(1, 1, 1)
+            tick.Font           = Enum.Font.GothamBold
+            tick.TextSize       = 7
+            tick.Text           = "✓"
+            tick.ZIndex         = 7
+            tick.Parent         = box
+        end
+    end
+end
+
+-- ─── Inventory Panel ─────────────────────────────────────────────────────────
+
+local inventoryPanel: Frame? = nil
+
+local function buildInventoryPanel(): Frame
+    local WeaponData = require(ReplicatedStorage.Data.WeaponData)
+    local wDef       = WeaponData[playerStats.weaponId]
+
+    local panel                 = Instance.new("Frame")
+    panel.Name                  = "InventoryPanel"
+    panel.Size                  = UDim2.new(0, 310, 0, 270)
+    panel.Position              = UDim2.new(0.5, -155, 0.5, -135)
+    panel.BackgroundColor3      = Color3.fromRGB(12, 12, 16)
+    panel.BorderSizePixel       = 0
+    panel.ZIndex                = 40
+    panel.Parent                = hud.screenGui
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 8)
+    corner.Parent = panel
+
+    -- Title bar
+    local titleBar              = Instance.new("Frame")
+    titleBar.Size               = UDim2.new(1, 0, 0, 34)
+    titleBar.BackgroundColor3   = Color3.fromRGB(30, 30, 40)
+    titleBar.BorderSizePixel    = 0
+    titleBar.ZIndex             = 41
+    titleBar.Parent             = panel
+    local titleCorner = Instance.new("UICorner")
+    titleCorner.CornerRadius = UDim.new(0, 8)
+    titleCorner.Parent = titleBar
+
+    local titleLbl              = Instance.new("TextLabel")
+    titleLbl.Size               = UDim2.new(1, -12, 1, 0)
+    titleLbl.Position           = UDim2.new(0, 12, 0, 0)
+    titleLbl.BackgroundTransparency = 1
+    titleLbl.TextColor3         = Color3.new(1, 1, 1)
+    titleLbl.Font               = Enum.Font.GothamBlack
+    titleLbl.TextSize           = 15
+    titleLbl.Text               = "INVENTORY   [Tab to close]"
+    titleLbl.TextXAlignment     = Enum.TextXAlignment.Left
+    titleLbl.ZIndex             = 42
+    titleLbl.Parent             = titleBar
+
+    -- Stats block
+    local xpForNext     = math.floor(
+        Constants.XP_PER_LEVEL_BASE * ((playerStats.level + 1) ^ Constants.XP_PER_LEVEL_EXPONENT)
+    )
+    local statsLbl              = Instance.new("TextLabel")
+    statsLbl.Size               = UDim2.new(1, -20, 0, 54)
+    statsLbl.Position           = UDim2.new(0, 10, 0, 42)
+    statsLbl.BackgroundTransparency = 1
+    statsLbl.TextColor3         = Color3.fromRGB(210, 210, 210)
+    statsLbl.Font               = Enum.Font.Gotham
+    statsLbl.TextSize           = 13
+    statsLbl.Text               = string.format(
+        "Level: %d     Gold: %d\nXP: %d / %d",
+        playerStats.level, playerStats.gold, playerStats.xp, xpForNext
+    )
+    statsLbl.TextXAlignment     = Enum.TextXAlignment.Left
+    statsLbl.TextWrapped        = true
+    statsLbl.ZIndex             = 41
+    statsLbl.Parent             = panel
+
+    -- Divider
+    local div           = Instance.new("Frame")
+    div.Size            = UDim2.new(1, -20, 0, 1)
+    div.Position        = UDim2.new(0, 10, 0, 102)
+    div.BackgroundColor3 = Color3.fromRGB(55, 55, 65)
+    div.ZIndex          = 41
+    div.Parent          = panel
+
+    -- Weapon section
+    if wDef then
+        local rarityColor = Constants.RARITY_COLORS[wDef.rarity] or Color3.new(1, 1, 1)
+        local upgLv       = playerStats.weaponUpgrade
+        local finalDmg    = wDef.damage + wDef.upgradeScaling.damage * (upgLv - 1)
+        local finalSpd    = wDef.attackSpeed + wDef.upgradeScaling.attackSpeed * (upgLv - 1)
+
+        local wNameLbl              = Instance.new("TextLabel")
+        wNameLbl.Size               = UDim2.new(1, -20, 0, 24)
+        wNameLbl.Position           = UDim2.new(0, 10, 0, 110)
+        wNameLbl.BackgroundTransparency = 1
+        wNameLbl.TextColor3         = rarityColor
+        wNameLbl.Font               = Enum.Font.GothamBold
+        wNameLbl.TextSize           = 15
+        wNameLbl.Text               = string.format("%s  [Lv. %d / %d]", wDef.displayName, upgLv, wDef.maxUpgradeLevel)
+        wNameLbl.TextXAlignment     = Enum.TextXAlignment.Left
+        wNameLbl.ZIndex             = 41
+        wNameLbl.Parent             = panel
+
+        local wStatsLbl             = Instance.new("TextLabel")
+        wStatsLbl.Size              = UDim2.new(1, -20, 0, 80)
+        wStatsLbl.Position          = UDim2.new(0, 10, 0, 138)
+        wStatsLbl.BackgroundTransparency = 1
+        wStatsLbl.TextColor3        = Color3.fromRGB(175, 175, 175)
+        wStatsLbl.Font              = Enum.Font.Gotham
+        wStatsLbl.TextSize          = 13
+        wStatsLbl.Text              = string.format(
+            "%s  ·  %s  ·  %s\nDMG: %d    SPD: %.1f    RNG: %d    AoE: %d\n%s",
+            wDef.class, wDef.rarity,
+            wDef.element ~= "None" and wDef.element or "No element",
+            finalDmg, finalSpd, wDef.range, wDef.aoeRadius,
+            wDef.description
+        )
+        wStatsLbl.TextXAlignment    = Enum.TextXAlignment.Left
+        wStatsLbl.TextWrapped       = true
+        wStatsLbl.ZIndex            = 41
+        wStatsLbl.Parent            = panel
+    end
+
+    -- Close button
+    local closeBtn              = Instance.new("TextButton")
+    closeBtn.Size               = UDim2.new(1, -20, 0, 34)
+    closeBtn.Position           = UDim2.new(0, 10, 1, -44)
+    closeBtn.BackgroundColor3   = Color3.fromRGB(50, 25, 25)
+    closeBtn.BorderSizePixel    = 0
+    closeBtn.TextColor3         = Color3.new(1, 1, 1)
+    closeBtn.Font               = Enum.Font.GothamBold
+    closeBtn.TextSize           = 14
+    closeBtn.Text               = "CLOSE [Tab]"
+    closeBtn.ZIndex             = 41
+    closeBtn.Parent             = panel
+    local closeBtnCorner = Instance.new("UICorner")
+    closeBtnCorner.CornerRadius = UDim.new(0, 6)
+    closeBtnCorner.Parent = closeBtn
+
+    closeBtn.MouseButton1Click:Connect(function()
+        if panel and panel.Parent then
+            panel:Destroy()
+            inventoryPanel = nil
+        end
+    end)
+
+    return panel
+end
+
+local function openInventory()
+    if inventoryPanel then return end
+    inventoryPanel = buildInventoryPanel()
+end
+
+local function closeInventory()
+    if inventoryPanel then
+        inventoryPanel:Destroy()
+        inventoryPanel = nil
+    end
+end
+
+-- Tab key toggles inventory
+UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.Tab then
+        if inventoryPanel then
+            closeInventory()
+        else
+            openInventory()
+        end
+    end
+end)
 
 local function tweenBarFill(fill: Frame, ratio: number)
     TweenService:Create(fill, TweenInfo.new(0.15, Enum.EasingStyle.Quad), {
@@ -222,28 +469,122 @@ startStatPoll()
 -- Player stats update (XP, level, gold, equipped weapon)
 Remotes.PlayerStatsUpdated.OnClientEvent:Connect(function(data: { [string]: any })
     if data.level then
-        hud.levelLabel.Text = string.format("Lv. %d", data.level)
+        playerStats.level       = data.level
+        hud.levelLabel.Text     = string.format("Lv. %d", data.level)
     end
     if data.gold then
-        hud.goldLabel.Text = string.format("Gold: %s", tostring(data.gold))
+        playerStats.gold        = data.gold
+        hud.goldLabel.Text      = string.format("Gold: %s", tostring(data.gold))
+    end
+    if data.xp then
+        playerStats.xp          = data.xp
     end
     if data.xp and data.level then
         local xpForNext = math.floor(Constants.XP_PER_LEVEL_BASE * ((data.level + 1) ^ Constants.XP_PER_LEVEL_EXPONENT))
         tweenBarFill(hud.xpFill, data.xp / xpForNext)
     end
-    -- TODO: update weapon icon image when equippedWeapon changes
+    if data.weaponId then
+        playerStats.weaponId    = data.weaponId
+    end
+    if data.weaponUpgrade then
+        playerStats.weaponUpgrade = data.weaponUpgrade
+    end
+    -- Refresh open inventory if visible
+    if inventoryPanel then
+        closeInventory()
+        openInventory()
+    end
 end)
 
 -- Room / floor loaded
-Remotes.DungeonRoomLoaded.OnClientEvent:Connect(function(info: { floor: number, room: number })
-    hud.floorLabel.Text = string.format("Floor %d  ·  Room %d", info.floor, info.room)
+Remotes.DungeonRoomLoaded.OnClientEvent:Connect(function(info: { floor: number, room: number, roomTypes: { string }?, totalRooms: number? })
+    hud.floorLabel.Text = string.format("Floor %d  ·  Room %d / %d", info.floor, info.room, info.totalRooms or 0)
     hud.bossHealthBar.Visible = false
+    if info.roomTypes then
+        updateMinimap(info.roomTypes, info.room)
+    end
 end)
 
--- Boss spawned: reveal boss health bar
-Remotes.BossSpawned.OnClientEvent:Connect(function(info: { floor: number })
+-- Boss spawned: cinematic intro + reveal boss health bar
+Remotes.BossSpawned.OnClientEvent:Connect(function(info: { floor: number, bossName: string? })
+    local bossName = info.bossName or string.format("Floor %d BOSS", info.floor)
     hud.bossHealthBar.Visible = true
-    hud.bossNameLabel.Text    = string.format("Floor %d BOSS", info.floor)
+    hud.bossNameLabel.Text    = bossName
+
+    -- ── Cinematic overlay ────────────────────────────────────────────────────
+    local overlay               = Instance.new("Frame")
+    overlay.Name                = "BossIntroOverlay"
+    overlay.Size                = UDim2.new(1, 0, 1, 0)
+    overlay.BackgroundColor3    = Color3.new(0, 0, 0)
+    overlay.BackgroundTransparency = 1
+    overlay.ZIndex              = 50
+    overlay.Parent              = hud.screenGui
+
+    local bossLabel             = Instance.new("TextLabel")
+    bossLabel.Size              = UDim2.new(1, 0, 0, 70)
+    bossLabel.Position          = UDim2.new(0, 0, 0.36, 0)
+    bossLabel.BackgroundTransparency = 1
+    bossLabel.TextColor3        = Color3.fromRGB(220, 20, 20)
+    bossLabel.Font              = Enum.Font.GothamBlack
+    bossLabel.TextSize          = 0    -- animated from 0
+    bossLabel.Text              = bossName:upper()
+    bossLabel.TextXAlignment    = Enum.TextXAlignment.Center
+    bossLabel.TextStrokeColor3  = Color3.new(0, 0, 0)
+    bossLabel.TextStrokeTransparency = 0.4
+    bossLabel.ZIndex            = 52
+    bossLabel.Parent            = overlay
+
+    local subLabel              = Instance.new("TextLabel")
+    subLabel.Size               = UDim2.new(1, 0, 0, 30)
+    subLabel.Position           = UDim2.new(0, 0, 0.50, 0)
+    subLabel.BackgroundTransparency = 1
+    subLabel.TextColor3         = Color3.fromRGB(200, 200, 200)
+    subLabel.Font               = Enum.Font.GothamBold
+    subLabel.TextSize           = 20
+    subLabel.Text               = string.format("FLOOR %d  —  BOSS ENCOUNTER", info.floor)
+    subLabel.TextXAlignment     = Enum.TextXAlignment.Center
+    subLabel.TextTransparency   = 1    -- fades in
+    subLabel.ZIndex             = 52
+    subLabel.Parent             = overlay
+
+    -- Letterbox bars (top and bottom)
+    local barT                  = Instance.new("Frame")
+    barT.Size                   = UDim2.new(1, 0, 0, 0)
+    barT.BackgroundColor3       = Color3.new(0, 0, 0)
+    barT.BorderSizePixel        = 0
+    barT.ZIndex                 = 51
+    barT.Parent                 = overlay
+
+    local barB                  = Instance.new("Frame")
+    barB.Size                   = UDim2.new(1, 0, 0, 0)
+    barB.Position               = UDim2.new(0, 0, 1, 0)
+    barB.AnchorPoint            = Vector2.new(0, 1)
+    barB.BackgroundColor3       = Color3.new(0, 0, 0)
+    barB.BorderSizePixel        = 0
+    barB.ZIndex                 = 51
+    barB.Parent                 = overlay
+
+    -- Animate in
+    task.spawn(function()
+        TweenService:Create(barT, TweenInfo.new(0.3), { Size = UDim2.new(1, 0, 0, 52) }):Play()
+        TweenService:Create(barB, TweenInfo.new(0.3), { Size = UDim2.new(1, 0, 0, 52) }):Play()
+        TweenService:Create(overlay, TweenInfo.new(0.3), { BackgroundTransparency = 0.55 }):Play()
+        task.wait(0.35)
+
+        TweenService:Create(bossLabel, TweenInfo.new(0.4, Enum.EasingStyle.Back, Enum.EasingDirection.Out), { TextSize = 52 }):Play()
+        task.wait(0.45)
+        TweenService:Create(subLabel, TweenInfo.new(0.3), { TextTransparency = 0 }):Play()
+        task.wait(2.2)
+
+        -- Animate out
+        TweenService:Create(barT, TweenInfo.new(0.35), { Size = UDim2.new(1, 0, 0, 0) }):Play()
+        TweenService:Create(barB, TweenInfo.new(0.35), { Size = UDim2.new(1, 0, 0, 0) }):Play()
+        TweenService:Create(overlay, TweenInfo.new(0.35), { BackgroundTransparency = 1 }):Play()
+        TweenService:Create(bossLabel, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+        TweenService:Create(subLabel, TweenInfo.new(0.3), { TextTransparency = 1 }):Play()
+        task.wait(0.4)
+        overlay:Destroy()
+    end)
 end)
 
 -- Enemy health updates (only shown for boss enemies)
@@ -576,7 +917,7 @@ Remotes.EnemyKilled.OnClientEvent:Connect(function(info: { displayName: string, 
 
     local entry                 = Instance.new("TextLabel")
     entry.Size                  = UDim2.new(1, 0, 0, 22)
-    entry.Position              = UDim2.new(0, 0, 1, -22)
+    entry.Position              = UDim2.new(1, 0, 1, -22)  -- starts off-screen right
     entry.BackgroundTransparency= 0.4
     entry.BackgroundColor3      = Color3.fromRGB(0, 0, 0)
     entry.TextColor3            = Color3.fromRGB(255, 80, 80)
@@ -587,6 +928,11 @@ Remotes.EnemyKilled.OnClientEvent:Connect(function(info: { displayName: string, 
     entry.TextTruncate          = Enum.TextTruncate.AtEnd
     entry.ZIndex                = 5
     entry.Parent                = hud.killFeed
+
+    -- Slide in from the right
+    TweenService:Create(entry, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+        Position = UDim2.new(0, 0, 1, -22)
+    }):Play()
 
     table.insert(killFeedEntries, entry)
 

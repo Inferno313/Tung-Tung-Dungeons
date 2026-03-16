@@ -406,6 +406,24 @@ function DungeonManager.isLastRoom(_floorNumber: number, roomIndex: number): boo
     return roomIndex >= #roomInstances
 end
 
+-- Returns the type label ("Safe" | "Loot" | "Combat" | "Boss") for every room
+-- in the currently-loaded floor, in order.  Used by the client minimap.
+function DungeonManager.getFloorRoomTypes(): { string }
+    local types: { string } = {}
+    for _, room in roomInstances do
+        if room.isBoss then
+            table.insert(types, "Boss")
+        elseif room.isLoot then
+            table.insert(types, "Loot")
+        elseif room.isSafe then
+            table.insert(types, "Safe")
+        else
+            table.insert(types, "Combat")
+        end
+    end
+    return types
+end
+
 -- Destroys all current floor geometry.
 function DungeonManager.unload()
     if currentFloorFolder then
