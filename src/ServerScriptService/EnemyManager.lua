@@ -1,36 +1,49 @@
 --!strict
 -- EnemyManager.lua (ModuleScript, required by GameManager)
 -- Spawns, updates, and destroys Brainrot enemies.
--- Each enemy runs an independent AI loop via a StateMachine.
+-- Phase 3: status effects (Burn/Freeze/Shock/Bleed/Poison/Stun/Knockback)
+--          and archetype-specific ability VFX.
 
-local Players           = game:GetService("Players")
-local RunService        = game:GetService("RunService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local PathfindingService= game:GetService("PathfindingService")
+local Players            = game:GetService("Players")
+local RunService         = game:GetService("RunService")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local PathfindingService = game:GetService("PathfindingService")
+local TweenService       = game:GetService("TweenService")
 
-local BrainrotData   = require(ReplicatedStorage.Data.BrainrotData)
-local DungeonData    = require(ReplicatedStorage.Data.DungeonData)
-local Constants      = require(ReplicatedStorage.Data.Constants)
-local Util           = require(ReplicatedStorage.Modules.Util)
-local StateMachine   = require(ReplicatedStorage.Modules.StateMachine)
-local Remotes        = require(ReplicatedStorage.Remotes)
-local DungeonManager = require(script.Parent.DungeonManager)
+local BrainrotData      = require(ReplicatedStorage.Data.BrainrotData)
+local DungeonData       = require(ReplicatedStorage.Data.DungeonData)
+local Constants         = require(ReplicatedStorage.Data.Constants)
+local Util              = require(ReplicatedStorage.Modules.Util)
+local StateMachine      = require(ReplicatedStorage.Modules.StateMachine)
+local Remotes           = require(ReplicatedStorage.Remotes)
+local DungeonManager    = require(script.Parent.DungeonManager)
+local PlayerDataManager = require(script.Parent.PlayerDataManager)
 
 -- ─── Types ───────────────────────────────────────────────────────────────────
 
 type EnemyInstance = {
-    id:           string,
-    def:          BrainrotData.BrainrotDef,
-    model:        Model,
-    humanoid:     Humanoid,
-    rootPart:     BasePart,
-    health:       number,
-    maxHealth:    number,
-    fsm:          StateMachine.StateMachineInstance,
-    target:       Player?,
+    id:               string,
+    def:              BrainrotData.BrainrotDef,
+    model:            Model,
+    humanoid:         Humanoid,
+    rootPart:         BasePart,
+    health:           number,
+    maxHealth:        number,
+    fsm:              StateMachine.StateMachineInstance,
+    target:           Player?,
     abilityCooldowns: { [string]: number },
     pathUpdateTimer:  number,
-    isAlive:      boolean,
+    isAlive:          boolean,
+    baseWalkSpeed:    number,    -- speed at spawn (floor-scaled); restored after freeze/stun
+    originalColor:    BrickColor, -- rootPart colour at spawn; restored when effects clear
+}
+
+type ActiveEffect = {
+    effectType: string,
+    remaining:  number,  -- seconds left
+    tickTimer:  number,  -- countdown to next DoT tick
+    value:      number,  -- damage per tick (DoT) or ignored (freeze/stun)
+    source:     Player?, -- who applied it (for XP credit on DoT kills)
 }
 
 -- ─── State ───────────────────────────────────────────────────────────────────
@@ -38,11 +51,36 @@ type EnemyInstance = {
 local EnemyManager = {}
 
 local activeEnemies: { EnemyInstance } = {}
-local roomKey: string = "0_0"   -- "floor_room"
+local activeEffects: { [any]: { [string]: ActiveEffect } } = {}
+local roomKey: string = "0_0"
+local lastBossDeathPosition: Vector3? = nil
+
+local PROJECTILE_SPEED = 80  -- studs per second
+
+-- ─── Status Effect Colours ───────────────────────────────────────────────────
+
+local EFFECT_COLORS: { [string]: BrickColor } = {
+    Burn      = BrickColor.new("Bright orange"),
+    Freeze    = BrickColor.new("Light blue"),
+    Shock     = BrickColor.new("Bright yellow"),
+    Bleed     = BrickColor.new("CGA brown"),    -- dark red tint
+    Poison    = BrickColor.new("Bright green"),
+    Stun      = BrickColor.new("Bright yellow"),
+}
+
+-- Returns the highest-priority effect colour active on an enemy (or nil).
+local function dominantEffectColor(effects: { [string]: ActiveEffect }): BrickColor?
+    local priority = { "Freeze", "Shock", "Stun", "Burn", "Poison", "Bleed" }
+    for _, effectType in priority do
+        if effects[effectType] then
+            return EFFECT_COLORS[effectType]
+        end
+    end
+    return nil
+end
 
 -- ─── Private Helpers ─────────────────────────────────────────────────────────
 
--- Weighted random pick from the floor's spawn table.
 local function pickBrainrotId(floorNumber: number): string
     local floorDef = DungeonData.getFloor(floorNumber)
     local entries  = {}
@@ -55,15 +93,13 @@ local function pickBrainrotId(floorNumber: number): string
     return Util.weightedRandom(entries)
 end
 
--- Applies floor scaling to a base stat value.
 local function scaleStatForFloor(base: number, scalePerFloor: number, floor: number): number
     return math.floor(base * (1 + scalePerFloor * (floor - 1)))
 end
 
--- Finds the nearest alive player to a given position.
 local function nearestPlayer(pos: Vector3): (Player?, number)
-    local closest: Player?  = nil
-    local closestDist       = math.huge
+    local closest: Player? = nil
+    local closestDist      = math.huge
     for _, player in Players:GetPlayers() do
         local char = player.Character
         if not char then continue end
@@ -78,7 +114,6 @@ local function nearestPlayer(pos: Vector3): (Player?, number)
     return closest, closestDist
 end
 
--- Broadcasts updated HP to all clients (shown on enemy health bars).
 local function broadcastHealth(enemy: EnemyInstance)
     Remotes.EnemyHealthUpdated:FireAllClients({
         enemyId   = enemy.id .. tostring(enemy.model),
@@ -88,7 +123,8 @@ local function broadcastHealth(enemy: EnemyInstance)
     })
 end
 
--- Deals damage to an enemy and handles death.
+-- ─── Damage ──────────────────────────────────────────────────────────────────
+
 local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Player?)
     if not enemy.isAlive then return end
     enemy.health = math.max(0, enemy.health - amount)
@@ -98,22 +134,24 @@ local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Playe
         enemy.isAlive = false
         enemy.humanoid.Health = 0
 
-        -- Award XP and gold
-        if attacker then
-            Remotes.PlayerStatsUpdated:FireClient(attacker, {
-                xpGained   = enemy.def.xpReward,
-                goldGained = Util.randomInt(enemy.def.goldReward.min, enemy.def.goldReward.max),
-            })
+        if enemy.def.archetype == "Boss" then
+            lastBossDeathPosition = enemy.rootPart.Position
         end
 
-        -- Broadcast kill to all clients for kill feed
+        -- Clean up status effects
+        activeEffects[enemy] = nil
+
+        if attacker then
+            local gold = Util.randomInt(enemy.def.goldReward.min, enemy.def.goldReward.max)
+            PlayerDataManager.awardKillRewards(attacker, enemy.def.xpReward, gold)
+        end
+
         Remotes.EnemyKilled:FireAllClients({
             displayName = enemy.def.displayName,
             killedBy    = attacker and attacker.Name or "Unknown",
             xpReward    = enemy.def.xpReward,
         })
 
-        -- Brief death animation pause then destroy
         task.delay(1.5, function()
             if enemy.model and enemy.model.Parent then
                 enemy.model:Destroy()
@@ -122,7 +160,75 @@ local function damageEnemy(enemy: EnemyInstance, amount: number, attacker: Playe
     end
 end
 
--- ─── AI State Machine Builder ─────────────────────────────────────────────────
+-- ─── Status Effects ───────────────────────────────────────────────────────────
+
+local WeaponData = require(ReplicatedStorage.Data.WeaponData)
+
+-- Applies all effect rolls from a weapon hit to the target enemy.
+local function applyStatusEffects(
+    enemy: EnemyInstance,
+    effects: { WeaponData.WeaponEffect },
+    attacker: Player?
+)
+    if not enemy.isAlive then return end
+    if #effects == 0 then return end
+
+    local enemyFx = activeEffects[enemy]
+    if not enemyFx then
+        enemyFx = {}
+        activeEffects[enemy] = enemyFx
+    end
+
+    for _, effect in effects do
+        if math.random() >= effect.chance then continue end
+
+        if effect.type == "Knockback" then
+            -- Immediate impulse, no duration tracking needed
+            if attacker and attacker.Character then
+                local aRoot = attacker.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+                if aRoot then
+                    local dir = Vector3.new(
+                        enemy.rootPart.Position.X - aRoot.Position.X,
+                        0,
+                        enemy.rootPart.Position.Z - aRoot.Position.Z
+                    ).Unit
+                    local bv        = Instance.new("BodyVelocity")
+                    bv.Velocity     = dir * effect.value * 2
+                    bv.MaxForce     = Vector3.new(1e5, 0, 1e5)
+                    bv.Parent       = enemy.rootPart
+                    task.delay(0.35, function()
+                        if bv.Parent then bv:Destroy() end
+                    end)
+                end
+            end
+            continue
+        end
+
+        -- Refresh or start the effect
+        enemyFx[effect.type] = {
+            effectType = effect.type,
+            remaining  = effect.duration,
+            tickTimer  = (effect.type == "Shock" or effect.type == "Poison") and 0.5 or 1.0,
+            value      = effect.value,
+            source     = attacker,
+        }
+
+        -- Immediate stat changes on first application
+        if effect.type == "Freeze" then
+            enemy.humanoid.WalkSpeed = math.max(0, enemy.baseWalkSpeed * 0.4)
+        elseif effect.type == "Stun" or effect.type == "Shock" then
+            enemy.humanoid.WalkSpeed = 0
+        end
+
+        -- Tint the enemy the dominant effect colour
+        local newColor = dominantEffectColor(enemyFx)
+        if newColor then
+            enemy.rootPart.BrickColor = newColor
+        end
+    end
+end
+
+-- ─── AI State Machine ─────────────────────────────────────────────────────────
 
 local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineInstance
     local fsm = StateMachine.new("Idle", {
@@ -133,25 +239,33 @@ local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineIns
         Dead    = {},
     })
 
-    -- ── Transitions ────────────────────────────────────────────────────────
-    fsm:addTransition("Idle",    "playerInRange",     "Chase")
-    fsm:addTransition("Chase",   "playerInAttack",    "Attack")
-    fsm:addTransition("Chase",   "playerOutRange",    "Idle")
-    fsm:addTransition("Attack",  "playerOutAttack",   "Chase")
-    fsm:addTransition("Attack",  "playerOutRange",    "Idle")
-    fsm:addTransition("Attack",  "abilityReady",      "Ability")
-    fsm:addTransition("Ability", "abilityCast",       "Chase")
-    fsm:addTransition("Chase",   "abilityReady",      "Ability")
-    fsm:addTransition("Idle",    "died",              "Dead")
-    fsm:addTransition("Chase",   "died",              "Dead")
-    fsm:addTransition("Attack",  "died",              "Dead")
-    fsm:addTransition("Ability", "died",              "Dead")
+    fsm:addTransition("Idle",    "playerInRange",  "Chase")
+    fsm:addTransition("Chase",   "playerInAttack", "Attack")
+    fsm:addTransition("Chase",   "playerOutRange", "Idle")
+    fsm:addTransition("Attack",  "playerOutAttack","Chase")
+    fsm:addTransition("Attack",  "playerOutRange", "Idle")
+    fsm:addTransition("Attack",  "abilityReady",   "Ability")
+    fsm:addTransition("Ability", "abilityCast",    "Chase")
+    fsm:addTransition("Chase",   "abilityReady",   "Ability")
+    fsm:addTransition("Idle",    "died",           "Dead")
+    fsm:addTransition("Chase",   "died",           "Dead")
+    fsm:addTransition("Attack",  "died",           "Dead")
+    fsm:addTransition("Ability", "died",           "Dead")
 
-    -- ── Update Ticks ───────────────────────────────────────────────────────
-    fsm:onUpdate("Idle", function(_, dt)
+    fsm:onUpdate("Idle", function(_, _dt)
         if not enemy.isAlive then fsm:send("died") return end
-        local target, dist = nearestPlayer(enemy.rootPart.Position)
-        if target and dist <= Constants.ENEMY_AGGRO_RANGE then
+        local _, dist = nearestPlayer(enemy.rootPart.Position)
+        local target = nil
+        for _, p in Players:GetPlayers() do
+            local char = p.Character
+            if not char then continue end
+            local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+            if root and (root.Position - enemy.rootPart.Position).Magnitude <= Constants.ENEMY_AGGRO_RANGE then
+                target = p
+                break
+            end
+        end
+        if target then
             enemy.target = target
             fsm:send("playerInRange")
         end
@@ -173,17 +287,15 @@ local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineIns
         end
 
         local dist = (targetRoot.Position - enemy.rootPart.Position).Magnitude
-
         if dist > Constants.ENEMY_DEAGGRO_RANGE then
             enemy.target = nil
             fsm:send("playerOutRange")
             return
         end
 
-        -- Check ability cooldowns
         for _, abilityDef in enemy.def.abilities do
-            local cooldown = enemy.abilityCooldowns[abilityDef.name] or 0
-            if cooldown <= 0 and dist <= abilityDef.range then
+            local cd = enemy.abilityCooldowns[abilityDef.name] or 0
+            if cd <= 0 and dist <= abilityDef.range then
                 fsm:send("abilityReady")
                 return
             end
@@ -194,7 +306,6 @@ local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineIns
             return
         end
 
-        -- Pathfind towards target
         enemy.pathUpdateTimer -= dt
         if enemy.pathUpdateTimer <= 0 then
             enemy.pathUpdateTimer = Constants.ENEMY_PATH_UPDATE_RATE
@@ -206,16 +317,15 @@ local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineIns
             })
             path:ComputeAsync(enemy.rootPart.Position, targetRoot.Position)
             if path.Status == Enum.PathStatus.Success then
-                local waypoints = path:GetWaypoints()
-                if #waypoints >= 2 then
-                    enemy.humanoid:MoveTo(waypoints[2].Position)
+                local wps = path:GetWaypoints()
+                if #wps >= 2 then
+                    enemy.humanoid:MoveTo(wps[2].Position)
                 end
             else
                 enemy.humanoid:MoveTo(targetRoot.Position)
             end
         end
 
-        -- Decrement ability cooldowns
         for abilityName, cd in enemy.abilityCooldowns do
             enemy.abilityCooldowns[abilityName] = math.max(0, cd - dt)
         end
@@ -226,23 +336,19 @@ local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineIns
         local target = enemy.target
         if not target or not target.Character then return end
 
-        -- Stop movement
         enemy.humanoid:MoveTo(enemy.rootPart.Position)
 
-        -- Face the target
         local targetRoot = target.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
         if targetRoot then
             local lookAt = Vector3.new(targetRoot.Position.X, enemy.rootPart.Position.Y, targetRoot.Position.Z)
             enemy.rootPart.CFrame = CFrame.new(enemy.rootPart.Position, lookAt)
         end
 
-        -- Deal damage
         local targetHum = target.Character:FindFirstChildOfClass("Humanoid") :: Humanoid?
         if targetHum and targetHum.Health > 0 then
             targetHum:TakeDamage(enemy.def.damage)
         end
 
-        -- Return to chase after attack cooldown
         task.delay(1 / enemy.def.attackRate, function()
             if enemy.isAlive and fsm:is("Attack") then
                 local _, dist = nearestPlayer(enemy.rootPart.Position)
@@ -253,39 +359,159 @@ local function buildEnemyFSM(enemy: EnemyInstance): StateMachine.StateMachineIns
         end)
     end)
 
+    -- ── Archetype-specific ability VFX ────────────────────────────────────────
     fsm:onEnter("Ability", function(_)
         if not enemy.isAlive then return end
-        -- Find a ready ability with a target in range
-        for _, abilityDef in enemy.def.abilities do
-            local cooldown = enemy.abilityCooldowns[abilityDef.name] or 0
-            local target   = enemy.target
-            if cooldown > 0 or not target or not target.Character then continue end
 
+        local chosenAbility: BrainrotData.AbilityDef? = nil
+        for _, abilityDef in enemy.def.abilities do
+            local cd     = enemy.abilityCooldowns[abilityDef.name] or 0
+            local target = enemy.target
+            if cd > 0 or not target or not target.Character then continue end
             local targetRoot = target.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
             if not targetRoot then continue end
-            local dist = (targetRoot.Position - enemy.rootPart.Position).Magnitude
-            if dist > abilityDef.range then continue end
-
-            -- Cast the ability
+            if (targetRoot.Position - enemy.rootPart.Position).Magnitude > abilityDef.range then continue end
+            chosenAbility = abilityDef
             enemy.abilityCooldowns[abilityDef.name] = abilityDef.cooldown
-
-            -- Apply ability damage
-            if abilityDef.damage > 0 then
-                local targetHum = target.Character:FindFirstChildOfClass("Humanoid") :: Humanoid?
-                if targetHum and targetHum.Health > 0 then
-                    targetHum:TakeDamage(abilityDef.damage)
-                end
-            end
-
-            -- TODO: archetype-specific ability VFX / movement (ChargeRush, BombBarrage, etc.)
-            -- This is where per-ability logic is implemented in Phase 3.
             break
         end
 
-        task.delay(0.8, function()
-            if enemy.isAlive then
-                fsm:send("abilityCast")
+        if chosenAbility then
+            local abilityDef = chosenAbility
+            local archetype  = enemy.def.archetype
+            local target     = enemy.target
+
+            -- ── Charger: dash toward player ─────────────────────────────────
+            if archetype == "Charger" then
+                if target and target.Character then
+                    local tRoot = target.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+                    if tRoot then
+                        local dir = Vector3.new(
+                            tRoot.Position.X - enemy.rootPart.Position.X,
+                            0,
+                            tRoot.Position.Z - enemy.rootPart.Position.Z
+                        ).Unit
+                        local bv    = Instance.new("BodyVelocity")
+                        bv.Velocity = dir * 70
+                        bv.MaxForce = Vector3.new(1e5, 0, 1e5)
+                        bv.Parent   = enemy.rootPart
+                        -- Brief orange flash to signal the dash
+                        enemy.rootPart.BrickColor = BrickColor.new("Bright orange")
+                        task.delay(0.35, function()
+                            if bv.Parent then bv:Destroy() end
+                            -- Damage any player we're close to at end of dash
+                            if not enemy.isAlive then return end
+                            local _, d = nearestPlayer(enemy.rootPart.Position)
+                            if d <= enemy.def.attackRange + 3 then
+                                local tgt = enemy.target
+                                if tgt and tgt.Character then
+                                    local tHum = tgt.Character:FindFirstChildOfClass("Humanoid") :: Humanoid?
+                                    if tHum and tHum.Health > 0 then
+                                        tHum:TakeDamage(abilityDef.damage)
+                                    end
+                                end
+                            end
+                            if not activeEffects[enemy] then
+                                enemy.rootPart.BrickColor = enemy.originalColor
+                            end
+                        end)
+                    end
+                end
+
+            -- ── Ranged: fire a projectile at the player ──────────────────────
+            elseif archetype == "Ranged" then
+                if target and target.Character then
+                    local tRoot = target.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+                    if tRoot then
+                        local dir  = (tRoot.Position - enemy.rootPart.Position).Unit
+                        local proj = Instance.new("Part")
+                        proj.Name         = "EnemyProjectile"
+                        proj.Shape        = Enum.PartType.Ball
+                        proj.Size         = Vector3.new(0.8, 0.8, 0.8)
+                        proj.CFrame       = CFrame.new(enemy.rootPart.Position + Vector3.new(0, 1, 0))
+                        proj.Material     = Enum.Material.Neon
+                        proj.Color        = Color3.fromRGB(255, 80, 0)
+                        proj.CanCollide   = false
+                        proj.CastShadow   = false
+                        proj.Parent       = workspace
+                        local bv          = Instance.new("BodyVelocity")
+                        bv.Velocity       = dir * 55
+                        bv.MaxForce       = Vector3.new(1e5, 1e5, 1e5)
+                        bv.Parent         = proj
+                        local hitHandled  = false
+                        proj.Touched:Connect(function(part: BasePart)
+                            if hitHandled then return end
+                            local char = part.Parent :: Model?
+                            if not char then return end
+                            local hum    = char:FindFirstChildOfClass("Humanoid") :: Humanoid?
+                            local player = Players:GetPlayerFromCharacter(char)
+                            if player and hum and hum.Health > 0 then
+                                hitHandled = true
+                                hum:TakeDamage(abilityDef.damage)
+                                proj:Destroy()
+                            end
+                        end)
+                        task.delay(4, function()
+                            if proj and proj.Parent then proj:Destroy() end
+                        end)
+                    end
+                end
+
+            -- ── Boss: shockwave AoE centered on the boss ─────────────────────
+            elseif archetype == "Boss" then
+                for _, p in Players:GetPlayers() do
+                    if not p.Character then continue end
+                    local pRoot = p.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+                    if not pRoot then continue end
+                    if (pRoot.Position - enemy.rootPart.Position).Magnitude <= abilityDef.range then
+                        local pHum = p.Character:FindFirstChildOfClass("Humanoid") :: Humanoid?
+                        if pHum and pHum.Health > 0 then
+                            pHum:TakeDamage(abilityDef.damage)
+                        end
+                    end
+                end
+                -- Expanding ring VFX
+                local ring         = Instance.new("Part")
+                ring.Shape         = Enum.PartType.Cylinder
+                ring.Size          = Vector3.new(0.4, 2, 2)
+                ring.CFrame        = CFrame.new(enemy.rootPart.Position) * CFrame.Angles(0, 0, math.pi / 2)
+                ring.Anchored      = true
+                ring.CanCollide    = false
+                ring.Material      = Enum.Material.Neon
+                ring.Color         = Color3.fromRGB(200, 80, 255)
+                ring.Transparency  = 0.2
+                ring.Parent        = workspace
+                local targetSize   = abilityDef.range * 2 + 4
+                TweenService:Create(ring, TweenInfo.new(0.45, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {
+                    Size         = Vector3.new(0.2, targetSize, targetSize),
+                    Transparency = 1,
+                }):Play()
+                task.delay(0.5, function()
+                    if ring.Parent then ring:Destroy() end
+                end)
+
+            -- ── Tank: temporary damage reduction (visual only for now) ────────
+            elseif archetype == "Tank" then
+                enemy.rootPart.BrickColor = BrickColor.new("Dark stone grey")
+                task.delay(3, function()
+                    if enemy.isAlive and not activeEffects[enemy] then
+                        enemy.rootPart.BrickColor = enemy.originalColor
+                    end
+                end)
+
+            -- ── Stealth: briefly go semi-transparent ─────────────────────────
+            elseif archetype == "Stealth" then
+                enemy.rootPart.Transparency = 0.75
+                task.delay(2, function()
+                    if enemy.isAlive then
+                        enemy.rootPart.Transparency = 0
+                    end
+                end)
             end
+        end
+
+        task.delay(0.8, function()
+            if enemy.isAlive then fsm:send("abilityCast") end
         end)
     end)
 
@@ -294,7 +520,6 @@ end
 
 -- ─── Spawn ───────────────────────────────────────────────────────────────────
 
--- Creates and registers a single enemy at the given world position.
 local function spawnEnemy(brainrotId: string, position: Vector3, floorNumber: number)
     local def = BrainrotData[brainrotId]
     if not def then
@@ -302,35 +527,35 @@ local function spawnEnemy(brainrotId: string, position: Vector3, floorNumber: nu
         return
     end
 
-    local floorDef = DungeonData.getFloor(floorNumber)
+    local floorDef     = DungeonData.getFloor(floorNumber)
     local scaledHealth = scaleStatForFloor(
         def.health,
         Constants.ENEMY_HEALTH_SCALE_PER_FLOOR,
         floorNumber
     ) * floorDef.enemyModifiers.healthMultiplier
 
-    -- Build a simple placeholder model (artists replace via Roblox Studio)
-    local model = Instance.new("Model")
-    model.Name  = def.displayName
+    local scaledSpeed  = def.speed * floorDef.enemyModifiers.speedMultiplier
 
-    local rootPart          = Instance.new("Part")
-    rootPart.Name           = "HumanoidRootPart"
-    rootPart.Size           = Vector3.new(2, 5, 2)
-    rootPart.Position       = position
-    rootPart.BrickColor     = BrickColor.new("Bright red")
-    rootPart.Anchored       = false
-    rootPart.Parent         = model
+    local model        = Instance.new("Model")
+    model.Name         = def.displayName
 
-    local humanoid          = Instance.new("Humanoid")
-    humanoid.MaxHealth      = scaledHealth
-    humanoid.Health         = scaledHealth
-    humanoid.WalkSpeed      = def.speed * floorDef.enemyModifiers.speedMultiplier
-    humanoid.Parent         = model
+    local rootPart         = Instance.new("Part")
+    rootPart.Name          = "HumanoidRootPart"
+    rootPart.Size          = Vector3.new(2, 5, 2)
+    rootPart.Position      = position
+    rootPart.BrickColor    = BrickColor.new("Bright red")
+    rootPart.Anchored      = false
+    rootPart.Parent        = model
 
-    model.PrimaryPart       = rootPart
-    model.Parent            = workspace
+    local humanoid         = Instance.new("Humanoid")
+    humanoid.MaxHealth     = scaledHealth
+    humanoid.Health        = scaledHealth
+    humanoid.WalkSpeed     = scaledSpeed
+    humanoid.Parent        = model
 
-    -- Build ability cooldown table (all start at 0)
+    model.PrimaryPart      = rootPart
+    model.Parent           = workspace
+
     local abilityCooldowns: { [string]: number } = {}
     for _, abilityDef in def.abilities do
         abilityCooldowns[abilityDef.name] = 0
@@ -349,11 +574,12 @@ local function spawnEnemy(brainrotId: string, position: Vector3, floorNumber: nu
         abilityCooldowns = abilityCooldowns,
         pathUpdateTimer  = 0,
         isAlive          = true,
+        baseWalkSpeed    = scaledSpeed,
+        originalColor    = BrickColor.new("Bright red"),
     }
 
     enemy.fsm = buildEnemyFSM(enemy)
 
-    -- Wire Humanoid.Died to our damage system
     humanoid.Died:Connect(function()
         enemy.isAlive = false
     end)
@@ -363,22 +589,19 @@ end
 
 -- ─── Public API ──────────────────────────────────────────────────────────────
 
--- Spawns all enemies for the given room using the floor's spawn table.
 function EnemyManager.spawnRoomEnemies(floorNumber: number, roomIndex: number)
     roomKey = string.format("%d_%d", floorNumber, roomIndex)
 
     local spawnPoints = DungeonManager.getRoomSpawnPoints(roomIndex)
     if #spawnPoints == 0 then return end
 
-    local floorDef   = DungeonData.getFloor(floorNumber)
-    local baseCount  = math.random(3, Constants.MAX_ENEMIES_PER_ROOM)
-    local scaledCount= math.floor(baseCount * (1 + Constants.ENEMY_COUNT_SCALE_PER_FLOOR * (floorNumber - 1)))
-    local count      = math.min(scaledCount, #spawnPoints)
+    local floorDef    = DungeonData.getFloor(floorNumber)
+    local baseCount   = math.random(3, Constants.MAX_ENEMIES_PER_ROOM)
+    local scaledCount = math.floor(baseCount * (1 + Constants.ENEMY_COUNT_SCALE_PER_FLOOR * (floorNumber - 1)))
+    local count       = math.min(scaledCount, #spawnPoints)
 
-    -- Boss room: spawn boss only
     if DungeonManager.isBossRoom(floorNumber, roomIndex) and floorDef.bossId then
-        local bossPoint = spawnPoints[1]
-        spawnEnemy(floorDef.bossId, bossPoint, floorNumber)
+        spawnEnemy(floorDef.bossId, spawnPoints[1], floorNumber)
         return
     end
 
@@ -389,7 +612,6 @@ function EnemyManager.spawnRoomEnemies(floorNumber: number, roomIndex: number)
     end
 end
 
--- Returns true if all enemies in the current room are dead.
 function EnemyManager.isRoomCleared(_floor: number, _room: number): boolean
     for _, enemy in activeEnemies do
         if enemy.isAlive then return false end
@@ -397,7 +619,6 @@ function EnemyManager.isRoomCleared(_floor: number, _room: number): boolean
     return true
 end
 
--- Destroys all active enemies (e.g., on floor unload).
 function EnemyManager.despawnAll()
     for _, enemy in activeEnemies do
         if enemy.model and enemy.model.Parent then
@@ -405,44 +626,193 @@ function EnemyManager.despawnAll()
         end
     end
     activeEnemies = {}
+    activeEffects = {}
 end
 
--- Called by the attack remote to deal damage to the nearest enemy.
+function EnemyManager.getLastBossPosition(): Vector3?
+    return lastBossDeathPosition
+end
+
+-- ─── Projectile System ───────────────────────────────────────────────────────
+
+local PROJECTILE_COLORS: { [string]: Color3 } = {
+    Fire     = Color3.fromRGB(255, 120,  20),
+    Ice      = Color3.fromRGB(100, 210, 255),
+    Electric = Color3.fromRGB(255, 240,  50),
+    Chaos    = Color3.fromRGB(200,  80, 255),
+    None     = Color3.fromRGB(200, 200, 200),
+}
+
+local function spawnProjectile(player: Player, weaponDef: WeaponData.WeaponDef, origin: Vector3, direction: Vector3)
+    local proj         = Instance.new("Part")
+    proj.Name          = "Projectile_" .. weaponDef.id
+    proj.Shape         = Enum.PartType.Ball
+    proj.Size          = Vector3.new(0.7, 0.7, 0.7)
+    proj.CFrame        = CFrame.new(origin + Vector3.new(0, 1.2, 0))
+    proj.Material      = Enum.Material.Neon
+    proj.Color         = PROJECTILE_COLORS[weaponDef.element] or PROJECTILE_COLORS.None
+    proj.CastShadow    = false
+    proj.CanCollide    = false
+    proj.Parent        = workspace
+
+    local bv           = Instance.new("BodyVelocity")
+    bv.Velocity        = direction.Unit * PROJECTILE_SPEED
+    bv.MaxForce        = Vector3.new(1e5, 1e5, 1e5)
+    bv.Parent          = proj
+
+    local hitHandled   = false
+
+    proj.Touched:Connect(function(part: BasePart)
+        if hitHandled then return end
+        for _, enemy in activeEnemies do
+            if not enemy.isAlive then continue end
+            if part == enemy.rootPart or part:IsDescendantOf(enemy.model) then
+                hitHandled = not weaponDef.isPiercing
+                local hitPos = proj.Position
+
+                if weaponDef.aoeRadius > 0 then
+                    for _, aoeEnemy in activeEnemies do
+                        if not aoeEnemy.isAlive then continue end
+                        if (aoeEnemy.rootPart.Position - hitPos).Magnitude <= weaponDef.aoeRadius then
+                            damageEnemy(aoeEnemy, weaponDef.damage, player)
+                            applyStatusEffects(aoeEnemy, weaponDef.effects, player)
+                        end
+                    end
+                else
+                    damageEnemy(enemy, weaponDef.damage, player)
+                    applyStatusEffects(enemy, weaponDef.effects, player)
+                end
+
+                if hitHandled then proj:Destroy() end
+                return
+            end
+        end
+    end)
+
+    task.delay(weaponDef.range / PROJECTILE_SPEED + 0.1, function()
+        if proj and proj.Parent then proj:Destroy() end
+    end)
+end
+
+-- ─── Player Attack Handler ────────────────────────────────────────────────────
+
 function EnemyManager.handlePlayerAttack(player: Player, weaponId: string)
     local char = player.Character
     if not char then return end
     local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
     if not root then return end
 
-    local WeaponData = require(ReplicatedStorage.Data.WeaponData)
-    local weaponDef  = WeaponData[weaponId]
+    local weaponDef = WeaponData[weaponId]
     if not weaponDef then return end
 
-    -- Find enemies within weapon range
+    -- Ranged / Magic → projectile
+    if weaponDef.class == "Ranged" or weaponDef.class == "Magic" then
+        local aimDir = root.CFrame.LookVector
+        if weaponDef.isHoming then
+            local closestDist = math.huge
+            for _, enemy in activeEnemies do
+                if not enemy.isAlive then continue end
+                local d = (enemy.rootPart.Position - root.Position).Magnitude
+                if d < closestDist then
+                    closestDist = d
+                    aimDir = (enemy.rootPart.Position - root.Position).Unit
+                end
+            end
+        end
+        spawnProjectile(player, weaponDef, root.Position, aimDir)
+        return
+    end
+
+    -- Melee → 120° arc cone + optional AoE
+    local lookDir  = root.CFrame.LookVector
+    local flatLook = Vector3.new(lookDir.X, 0, lookDir.Z)
+    local hasAoE   = weaponDef.aoeRadius > 0
+    local hitRange = hasAoE and weaponDef.aoeRadius or weaponDef.range
+    local ARC_DOT  = 0.5  -- cos(60°)
+
     for _, enemy in activeEnemies do
         if not enemy.isAlive then continue end
-        local dist = (enemy.rootPart.Position - root.Position).Magnitude
-        if dist <= weaponDef.range then
-            damageEnemy(enemy, weaponDef.damage, player)
-            if not weaponDef.isPiercing then break end  -- single-target stops at first hit
+        local offset = enemy.rootPart.Position - root.Position
+        local dist   = offset.Magnitude
+        if dist > hitRange then continue end
+
+        if not hasAoE then
+            local flatOffset = Vector3.new(offset.X, 0, offset.Z)
+            if flatOffset.Magnitude > 0 and flatLook.Magnitude > 0 then
+                if flatOffset.Unit:Dot(flatLook.Unit) < ARC_DOT then continue end
+            end
         end
+
+        damageEnemy(enemy, weaponDef.damage, player)
+        applyStatusEffects(enemy, weaponDef.effects, player)
+        if not weaponDef.isPiercing and not hasAoE then break end
     end
 end
 
 -- ─── Heartbeat Loop ──────────────────────────────────────────────────────────
 
 RunService.Heartbeat:Connect(function(dt: number)
+    -- AI update
     for _, enemy in activeEnemies do
         if enemy.isAlive then
             enemy.fsm:update(dt)
+        end
+    end
+
+    -- Status effect processing
+    for enemy, effects in activeEffects do
+        if not enemy.isAlive then
+            activeEffects[enemy] = nil
+            continue
+        end
+
+        local anyActive = false
+        for effectType, effect in effects do
+            effect.remaining -= dt
+
+            -- DoT tick
+            if effectType == "Burn" or effectType == "Bleed" or
+               effectType == "Shock" or effectType == "Poison" then
+                effect.tickTimer -= dt
+                if effect.tickTimer <= 0 then
+                    local interval = (effectType == "Shock" or effectType == "Poison") and 0.5 or 1.0
+                    effect.tickTimer = interval
+                    damageEnemy(enemy, effect.value, effect.source)
+                end
+            end
+
+            if effect.remaining <= 0 then
+                effects[effectType] = nil
+                -- Restore speed if movement-impeding effect expired
+                if effectType == "Freeze" or effectType == "Stun" or effectType == "Shock" then
+                    if enemy.isAlive then
+                        enemy.humanoid.WalkSpeed = enemy.baseWalkSpeed
+                    end
+                end
+            else
+                anyActive = true
+            end
+        end
+
+        if not anyActive then
+            -- All effects expired — restore original colour
+            if enemy.isAlive then
+                enemy.rootPart.BrickColor = enemy.originalColor
+            end
+            activeEffects[enemy] = nil
+        else
+            -- Keep the dominant effect colour up to date
+            local newColor = dominantEffectColor(effects)
+            if newColor and enemy.isAlive then
+                enemy.rootPart.BrickColor = newColor
+            end
         end
     end
 end)
 
 -- ─── Remote Wiring ───────────────────────────────────────────────────────────
 
-local Remotes2 = require(ReplicatedStorage.Remotes)
-Remotes2.PlayerAttack.OnServerEvent:Connect(function(player: Player, weaponId: string)
+Remotes.PlayerAttack.OnServerEvent:Connect(function(player: Player, weaponId: string)
     EnemyManager.handlePlayerAttack(player, weaponId)
 end)
 

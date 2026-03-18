@@ -53,6 +53,10 @@ Constants.RARE_WEAPON_CHANCE = 0.05
 Constants.EPIC_WEAPON_CHANCE = 0.02
 Constants.LEGENDARY_WEAPON_CHANCE = 0.005
 
+-- ─── Weapon Upgrades ────────────────────────────────────────────────────────
+
+Constants.WEAPON_UPGRADE_COST_BASE = 50  -- gold cost × current weapon level
+
 -- ─── XP / Progression ───────────────────────────────────────────────────────
 
 Constants.XP_PER_LEVEL_BASE = 100
@@ -95,6 +99,11 @@ Constants.Remotes = {
     GameOver              = "GameOver",
     BossSpawned           = "BossSpawned",
     EnemyKilled           = "EnemyKilled",
+    RoomCleared           = "RoomCleared",
+
+    -- Upgrade station (bidirectional)
+    UpgradeWeapon         = "UpgradeWeapon",
+    UpgradeStationNearby  = "UpgradeStationNearby",
 }
 
 return Constants

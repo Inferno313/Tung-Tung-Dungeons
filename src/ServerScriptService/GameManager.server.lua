@@ -3,16 +3,19 @@
 -- Root game loop. Manages game states (Lobby → InGame → GameOver → Lobby)
 -- and coordinates between DungeonManager, EnemyManager, LootManager,
 -- and PlayerDataManager.
+-- Phase 2: door locking, room-clear detection, upgrade station interaction, boss loot.
 
-local Players         = game:GetService("Players")
-local RunService      = game:GetService("RunService")
+local Players           = game:GetService("Players")
+local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local Constants       = require(ReplicatedStorage.Data.Constants)
-local Remotes         = require(ReplicatedStorage.Remotes)
-local DungeonManager  = require(script.Parent.DungeonManager)
-local EnemyManager    = require(script.Parent.EnemyManager)
-local LootManager     = require(script.Parent.LootManager)
+local Constants         = require(ReplicatedStorage.Data.Constants)
+local DungeonData       = require(ReplicatedStorage.Data.DungeonData)
+local BrainrotData      = require(ReplicatedStorage.Data.BrainrotData)
+local Remotes           = require(ReplicatedStorage.Remotes)
+local DungeonManager    = require(script.Parent.DungeonManager)
+local EnemyManager      = require(script.Parent.EnemyManager)
+local LootManager       = require(script.Parent.LootManager)
 local PlayerDataManager = require(script.Parent.PlayerDataManager)
 
 -- ─── Types ───────────────────────────────────────────────────────────────────
@@ -55,6 +58,13 @@ local function allPlayersAlive(): boolean
     return #session.players > 0
 end
 
+-- Lock doors if the current room is a combat/boss room.
+local function lockCurrentRoomDoors()
+    if DungeonManager.isRoomLockable(session.currentFloor, session.currentRoom) then
+        DungeonManager.lockRoomDoors(session.currentRoom)
+    end
+end
+
 -- ─── State Transitions ───────────────────────────────────────────────────────
 
 local function startGame()
@@ -64,19 +74,20 @@ local function startGame()
     session.roomsCleared = 0
     session.players      = Players:GetPlayers()
 
-    -- Initialise player data for the run
     for _, player in session.players do
         PlayerDataManager.initRun(player)
     end
 
-    -- Load the first dungeon floor
     DungeonManager.loadFloor(session.currentFloor, function()
         session.state = "InGame"
         broadcastToAll(Remotes.DungeonRoomLoaded, {
-            floor = session.currentFloor,
-            room  = session.currentRoom,
+            floor      = session.currentFloor,
+            room       = session.currentRoom,
+            roomTypes  = DungeonManager.getFloorRoomTypes(),
+            totalRooms = #DungeonManager.getFloorRoomTypes(),
         })
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
+        lockCurrentRoomDoors()
     end)
 end
 
@@ -84,21 +95,26 @@ local function advanceRoom()
     session.currentRoom  += 1
     session.roomsCleared += 1
 
-    -- Notify clients
     broadcastToAll(Remotes.DungeonRoomLoaded, {
-        floor = session.currentFloor,
-        room  = session.currentRoom,
+        floor      = session.currentFloor,
+        room       = session.currentRoom,
+        roomTypes  = DungeonManager.getFloorRoomTypes(),
+        totalRooms = #DungeonManager.getFloorRoomTypes(),
     })
 
     DungeonManager.loadRoom(session.currentFloor, session.currentRoom, function()
         local isBoss = DungeonManager.isBossRoom(session.currentFloor, session.currentRoom)
         if isBoss then
             session.state = "BossRoom"
+            local floorDef  = DungeonData.getFloor(session.currentFloor)
+            local bossDef   = floorDef.bossId and BrainrotData[floorDef.bossId]
             broadcastToAll(Remotes.BossSpawned, {
-                floor = session.currentFloor,
+                floor    = session.currentFloor,
+                bossName = bossDef and bossDef.displayName or "???",
             })
         end
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
+        lockCurrentRoomDoors()
     end)
 end
 
@@ -110,15 +126,18 @@ local function advanceFloor()
         floor = session.currentFloor - 1,
     })
 
-    task.wait(3) -- brief pause between floors
+    task.wait(3)
 
     DungeonManager.loadFloor(session.currentFloor, function()
         session.state = "InGame"
         broadcastToAll(Remotes.DungeonRoomLoaded, {
-            floor = session.currentFloor,
-            room  = session.currentRoom,
+            floor      = session.currentFloor,
+            room       = session.currentRoom,
+            roomTypes  = DungeonManager.getFloorRoomTypes(),
+            totalRooms = #DungeonManager.getFloorRoomTypes(),
         })
         EnemyManager.spawnRoomEnemies(session.currentFloor, session.currentRoom)
+        lockCurrentRoomDoors()
     end)
 end
 
@@ -130,7 +149,6 @@ local function triggerGameOver(reason: string)
         roomsCleared = session.roomsCleared,
     })
 
-    -- Save run stats for all players
     for _, player in session.players do
         PlayerDataManager.saveRunStats(player, {
             floorReached = session.currentFloor,
@@ -138,22 +156,56 @@ local function triggerGameOver(reason: string)
         })
     end
 
-    -- Reset after lobby delay
     task.wait(10)
     session.state = "Lobby"
 end
 
--- ─── Remote Handlers ─────────────────────────────────────────────────────────
+-- ─── Room-Clear Heartbeat ─────────────────────────────────────────────────────
+-- Polls for room clears every 0.5 s, unlocks doors, and fires boss loot.
 
-Remotes.RequestNextRoom.OnServerEvent:Connect(function(player: Player)
+local roomClearTimer      = 0
+local roomClearHandled    = false
+
+RunService.Heartbeat:Connect(function(dt: number)
     if session.state ~= "InGame" and session.state ~= "BossRoom" then return end
 
-    -- Only advance if all enemies in the room are defeated
-    if not EnemyManager.isRoomCleared(session.currentFloor, session.currentRoom) then
-        return
+    roomClearTimer -= dt
+    if roomClearTimer > 0 then return end
+    roomClearTimer = 0.5
+
+    if roomClearHandled then return end
+    if not EnemyManager.isRoomCleared(session.currentFloor, session.currentRoom) then return end
+
+    roomClearHandled = true
+
+    -- Unlock doors
+    DungeonManager.unlockRoomDoors(session.currentRoom)
+
+    -- Drop boss loot automatically when the boss room is cleared
+    if session.state == "BossRoom" then
+        local bossPos = EnemyManager.getLastBossPosition()
+        if bossPos then
+            LootManager.dropBossLoot("boss", bossPos, session.players)
+        end
+        session.state = "InGame"  -- allow RequestNextRoom
     end
 
-    -- Drop loot for the cleared room
+    -- Notify clients the room is clear
+    broadcastToAll(Remotes.RoomCleared, {
+        floor = session.currentFloor,
+        room  = session.currentRoom,
+    })
+end)
+
+-- ─── Remote Handlers ─────────────────────────────────────────────────────────
+
+Remotes.RequestNextRoom.OnServerEvent:Connect(function(_player: Player)
+    if session.state ~= "InGame" and session.state ~= "BossRoom" then return end
+    if not EnemyManager.isRoomCleared(session.currentFloor, session.currentRoom) then return end
+
+    -- Reset the room-clear flag for the next room
+    roomClearHandled = false
+
     LootManager.dropRoomLoot(session.currentFloor, session.players, session.currentRoom)
 
     local isLastRoom = DungeonManager.isLastRoom(session.currentFloor, session.currentRoom)
@@ -161,6 +213,31 @@ Remotes.RequestNextRoom.OnServerEvent:Connect(function(player: Player)
         advanceFloor()
     else
         advanceRoom()
+    end
+end)
+
+-- Player presses E: check if they're near an upgrade station.
+Remotes.PlayerInteract.OnServerEvent:Connect(function(player: Player)
+    if session.state ~= "InGame" and session.state ~= "BossRoom" then return end
+
+    local char = player.Character
+    if not char then return end
+    local root = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+    if not root then return end
+
+    local stations = DungeonManager.getRoomUpgradeStations(session.currentRoom)
+    for _, stationPos in stations do
+        if (stationPos - root.Position).Magnitude <= 8 then
+            local weaponId    = PlayerDataManager.getEquippedWeapon(player)
+            local weaponLevel = PlayerDataManager.getWeaponLevel(player)
+            local upgradeCost = Constants.WEAPON_UPGRADE_COST_BASE * weaponLevel
+            Remotes.UpgradeStationNearby:FireClient(player, {
+                weaponId    = weaponId,
+                weaponLevel = weaponLevel,
+                upgradeCost = upgradeCost,
+            })
+            return
+        end
     end
 end)
 
@@ -180,7 +257,6 @@ Players.PlayerAdded:Connect(function(player: Player)
 end)
 
 Players.PlayerRemoving:Connect(function(player: Player)
-    -- Remove from active session
     for i, p in session.players do
         if p == player then
             table.remove(session.players, i)
@@ -194,18 +270,17 @@ Players.PlayerRemoving:Connect(function(player: Player)
     end
 end)
 
--- ─── Auto-Start When Enough Players ──────────────────────────────────────────
+-- ─── Auto-Start ───────────────────────────────────────────────────────────────
 
 Players.PlayerAdded:Connect(function()
     if session.state == "Lobby" and #Players:GetPlayers() >= 1 then
-        task.wait(5) -- brief countdown
+        task.wait(5)
         if session.state == "Lobby" then
             startGame()
         end
     end
 end)
 
--- Also start immediately if a player is already in the game at script load
 if #Players:GetPlayers() >= 1 then
     task.delay(5, function()
         if session.state == "Lobby" then
