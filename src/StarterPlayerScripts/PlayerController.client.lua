@@ -45,8 +45,8 @@ local heldKeys: { [Enum.KeyCode]: boolean } = {}
 local function cameraRelativeDirection(dir: Vector3): Vector3
     local camCF  = camera.CFrame
     local flat   = Vector3.new(camCF.LookVector.X, 0, camCF.LookVector.Z).Unit
-    local right  = flat:Cross(Vector3.new(0, 1, 0))
-    return -(right * dir.X + flat * -dir.Z).Unit
+    local right  = Vector3.new(0, 1, 0):Cross(flat)   -- up × forward = correct right
+    return (right * dir.X + flat * -dir.Z).Unit
 end
 
 local function getMoveInput(): Vector3
