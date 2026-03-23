@@ -208,17 +208,12 @@ local hud: HUDRefs = buildHUD()
 -- ─── Cached Player Stats (updated from server events) ────────────────────────
 
 local playerStats = {
-    level:        number,
-    xp:           number,
-    gold:         number,
-    weaponId:     string,
-    weaponUpgrade: number,
+    level         = 1,
+    xp            = 0,
+    gold          = 0,
+    weaponId      = "wooden_club",
+    weaponUpgrade = 1,
 }
-playerStats.level         = 1
-playerStats.xp            = 0
-playerStats.gold          = 0
-playerStats.weaponId      = "wooden_club"
-playerStats.weaponUpgrade = 1
 
 -- ─── Minimap ─────────────────────────────────────────────────────────────────
 
